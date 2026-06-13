@@ -57,6 +57,14 @@ COMPANION_DB_PATH=./data/companion.db \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli init-db
 ```
 
+Create a Kobo device token:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli token create "Clara BW"
+```
+
 Start the skeleton service:
 
 ```sh
@@ -64,4 +72,4 @@ CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
 ```
 
-The initial service exposes `GET /health`. Read-only Calibre metadata access is underway; Kobo endpoints are planned but not implemented yet.
+The initial service exposes `GET /health`, token management commands, and initial Kobo bootstrap/auth endpoints. Library sync and downloads are planned but not implemented yet.

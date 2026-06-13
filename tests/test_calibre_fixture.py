@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -28,7 +29,7 @@ class CalibreFixtureTests(TestCase):
         with TemporaryDirectory() as directory:
             library = create_calibre_fixture_library(Path(directory))
 
-            with sqlite3.connect(library.metadata_db_path) as connection:
+            with closing(sqlite3.connect(library.metadata_db_path)) as connection:
                 connection.row_factory = sqlite3.Row
                 rows = connection.execute(
                     """

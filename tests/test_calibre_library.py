@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -47,7 +48,7 @@ class CalibreLibraryTests(TestCase):
             fixture = create_calibre_fixture_library(Path(directory))
             library = CalibreLibrary(fixture.root)
 
-            with library.connect() as connection:
+            with closing(library.connect()) as connection:
                 count = connection.execute("SELECT count(*) FROM books").fetchone()[0]
                 with self.assertRaises(sqlite3.OperationalError):
                     connection.execute("CREATE TABLE should_not_write (id INTEGER)")
@@ -65,7 +66,7 @@ class CalibreLibraryTests(TestCase):
     def test_list_books_rejects_metadata_path_outside_library(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory))
-            with sqlite3.connect(fixture.metadata_db_path) as connection:
+            with closing(sqlite3.connect(fixture.metadata_db_path)) as connection:
                 connection.execute(
                     """
                     INSERT INTO books (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
@@ -89,7 +90,7 @@ def _write_book_files(root: Path, books: tuple[FixtureBook, ...]) -> None:
 
 
 def _write_metadata_db(path: Path, books: tuple[FixtureBook, ...]) -> None:
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         connection.executescript(
             """
             CREATE TABLE library_id (
