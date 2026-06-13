@@ -64,4 +64,4 @@ CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
 ```
 
-The initial service exposes `GET /health`. Kobo and Calibre library endpoints are planned but not implemented yet.
+The initial service exposes `GET /health`. Read-only Calibre metadata access is underway; Kobo endpoints are planned but not implemented yet.

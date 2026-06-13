@@ -18,6 +18,8 @@ only when agent-specific navigation or workflow notes change.
 
 - `src/calibre_kobo_companion/config.py`: environment-driven settings and
   validation.
+- `src/calibre_kobo_companion/calibre.py`: read-only Calibre metadata access
+  and path safety checks.
 - `src/calibre_kobo_companion/db.py`: companion database schema and
   initialization. This database is service-owned and may be writable.
 - `src/calibre_kobo_companion/server.py`: current HTTP skeleton.
