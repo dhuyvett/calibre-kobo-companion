@@ -11,6 +11,8 @@ from .config import Settings
 
 
 SUPPORTED_FORMATS = ("KEPUB", "EPUB")
+SYNC_TOKEN_VERSION = 2
+DEFAULT_KOBO_CATEGORY = "00000000-0000-0000-0000-000000000001"
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class SyncToken:
 
 def encode_sync_token(token: SyncToken) -> str:
     payload = {
+        "version": SYNC_TOKEN_VERSION,
         "since": token.since,
         "offset": token.offset,
     }
@@ -38,6 +41,9 @@ def decode_sync_token(value: str | None) -> SyncToken:
     except (ValueError, TypeError, json.JSONDecodeError):
         return SyncToken()
 
+    if payload.get("version") != SYNC_TOKEN_VERSION:
+        return SyncToken()
+
     since = payload.get("since")
     offset = payload.get("offset", 0)
     if not isinstance(since, str | type(None)):
@@ -52,7 +58,7 @@ def build_library_sync_payload(
     settings: Settings,
     token: str,
     sync_token: SyncToken,
-) -> tuple[dict[str, Any], dict[str, str]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     changed_books = tuple(
         book
         for book in books
@@ -74,19 +80,15 @@ def build_library_sync_payload(
         headers["x-kobo-sync"] = "continue"
 
     return (
-        {
-            "ChangedEntitlements": [],
-            "DeletedEntitlements": [],
-            "NewEntitlements": [
-                {
-                    "NewEntitlement": {
-                        "BookEntitlement": _book_entitlement(book),
-                        "BookMetadata": book_metadata(book, settings, token),
-                    }
+        [
+            {
+                "NewEntitlement": {
+                    "BookEntitlement": _book_entitlement(book),
+                    "BookMetadata": book_metadata(book, settings, token),
                 }
-                for book in page
-            ],
-        },
+            }
+            for book in page
+        ],
         headers,
     )
 
@@ -101,36 +103,41 @@ def book_metadata(
         return {}
 
     base_url = f"{settings.public_base_url}/kobo/{token}"
-    contributors = [{"Name": author} for author in book.authors]
+    contributors = list(book.authors)
+    contributor_roles = [{"Name": author} for author in book.authors]
+    download_url = f"{base_url}/download/{book.id}/{selected_format.format.lower()}"
     download_urls = [
         {
-            "Format": selected_format.format,
+            "Format": kobo_format,
             "Size": selected_format.uncompressed_size,
-            "Url": (
-                f"{base_url}/download/{book.id}/"
-                f"{selected_format.format.lower()}"
-            ),
+            "Url": download_url,
+            "Platform": "Generic",
         }
+        for kobo_format in _kobo_download_formats(selected_format.format)
     ]
 
     metadata: dict[str, Any] = {
-        "Categories": [],
+        "Categories": [DEFAULT_KOBO_CATEGORY],
         "Contributors": contributors,
-        "ContributorRoles": ["Author"] if contributors else [],
-        "CoverImageId": _cover_image_id(book),
+        "ContributorRoles": contributor_roles,
+        "CoverImageId": book.uuid,
         "CrossRevisionId": book.uuid,
-        "CurrentDisplayPrice": "0.00",
-        "CurrentLoveDisplayPrice": "0.00",
+        "CurrentDisplayPrice": {"CurrencyCode": "USD", "TotalAmount": 0},
+        "CurrentLoveDisplayPrice": {"TotalAmount": 0},
         "Description": book.description or "",
         "DownloadUrls": download_urls,
         "EntitlementId": book.uuid,
-        "Genre": "",
+        "ExternalIds": [],
+        "Genre": DEFAULT_KOBO_CATEGORY,
         "Id": book.uuid,
-        "IsDownloaded": False,
-        "IsSocialEnabled": False,
+        "IsEligibleForKoboLove": False,
+        "IsInternetArchive": False,
+        "IsPreOrder": False,
+        "IsSocialEnabled": True,
         "Language": _language_code(book.language),
+        "PhoneticPronunciations": {},
         "PublicationDate": _kobo_timestamp(book.pubdate or book.timestamp),
-        "Publisher": {"Name": book.publisher or ""},
+        "Publisher": {"Imprint": "", "Name": book.publisher or ""},
         "RevisionId": book.uuid,
         "Title": book.title,
         "WorkId": book.uuid,
@@ -166,6 +173,12 @@ def _select_download_format(book: CalibreBook) -> CalibreFormat | None:
         if format_name in formats_by_name:
             return formats_by_name[format_name]
     return None
+
+
+def _kobo_download_formats(format_name: str) -> tuple[str, ...]:
+    if format_name == "EPUB":
+        return ("EPUB3", "EPUB")
+    return (format_name,)
 
 
 def _cover_image_id(book: CalibreBook) -> str:

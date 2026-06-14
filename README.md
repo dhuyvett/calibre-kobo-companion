@@ -76,4 +76,4 @@ CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
 ```
 
-The initial service exposes `GET /health`, token management commands, Kobo bootstrap/auth endpoints, library sync, and book metadata responses. Downloads, covers, compatibility stubs, and packaging are planned but not implemented yet.
+The initial service exposes `GET /health`, token management commands, Kobo bootstrap/auth endpoints, library sync, book metadata responses, existing EPUB/KEPUB downloads, cover serving, and minimal compatibility stubs for common Kobo user/assets/analytics requests. KEPUB conversion, full compatibility coverage, TLS, and packaging are planned but not implemented yet.

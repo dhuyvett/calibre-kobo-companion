@@ -2,8 +2,10 @@
 
 This guide covers a local development or home-LAN setup. The service is still
 in progress: Kobo initialization, auth, library sync, and book metadata are
-implemented. Book downloads, cover images, compatibility stubs, and packaging
-are not implemented yet.
+implemented. Existing EPUB/KEPUB downloads and cover serving are also
+implemented, along with minimal compatibility stubs for common Kobo
+user/assets/analytics requests. KEPUB conversion, full compatibility coverage,
+TLS, and packaging are not implemented yet.
 
 ## Requirements
 
@@ -119,9 +121,13 @@ With the current implementation, the Kobo should be able to:
 - Authenticate through the dummy Kobo auth endpoints.
 - Request library sync.
 - Receive book metadata for EPUB and KEPUB books in the Calibre library.
+- Download existing EPUB and KEPUB files from the Calibre library.
+- Request cover images from Calibre `cover.jpg` files.
+- Receive harmless empty responses for common user, assets, and analytics
+  requests made by Kobo firmware during sync.
 
-Downloads and cover image requests are still expected to fail until the file
-and cover endpoints are implemented.
+EPUB-to-KEPUB conversion is still expected to fail until conversion support is
+implemented. EPUB-only books are currently advertised and served as EPUB.
 
 ## Token Management
 

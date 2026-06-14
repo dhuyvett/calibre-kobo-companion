@@ -108,6 +108,12 @@ class CalibreLibrary:
                 return book
         return None
 
+    def get_book_by_id(self, book_id: int) -> CalibreBook | None:
+        for book in self.list_books():
+            if book.id == book_id:
+                return book
+        return None
+
     def resolve_library_path(self, relative_path: str | Path) -> Path:
         relative = Path(relative_path)
         if relative.is_absolute():
