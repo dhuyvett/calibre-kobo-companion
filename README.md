@@ -42,6 +42,8 @@ Download-time KEPUB conversion, when enabled, writes only to temporary storage o
 The current implementation plan is in [docs/project-plan.md](docs/project-plan.md).
 For local server startup and Kobo device configuration, see
 [docs/kobo-setup.md](docs/kobo-setup.md).
+For `acme.sh` certificate deployment notes, see
+[docs/acme-sh-certificates.md](docs/acme-sh-certificates.md).
 
 ## Development
 

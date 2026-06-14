@@ -30,6 +30,11 @@ that would point the Kobo back at itself.
 `COMPANION_DB_PATH` is service-owned writable state. Keep it outside the
 Calibre library.
 
+For HTTPS, use an `https://` `PUBLIC_BASE_URL` and configure the server with
+certificate and key files once built-in TLS support is implemented. The
+certificate can come from any method trusted by the Kobo. If using `acme.sh`,
+keep those details in [acme-sh-certificates.md](acme-sh-certificates.md).
+
 ## Initialize the Companion Database
 
 From the repository root:
@@ -148,6 +153,6 @@ unauthorized responses from this service.
 - If sync returns no books, confirm the Calibre library contains EPUB or KEPUB
   formats and that `CALIBRE_LIBRARY_PATH` points at the directory containing
   `metadata.db`.
-- If the Kobo uses HTTPS-only behavior on a particular firmware version, put
-  the service behind a trusted reverse proxy and set `PUBLIC_BASE_URL` plus
-  `api_endpoint` to the HTTPS URL.
+- If the Kobo uses HTTPS-only behavior on a particular firmware version, use
+  built-in TLS once implemented or put the service behind a trusted reverse
+  proxy, then set `PUBLIC_BASE_URL` plus `api_endpoint` to the HTTPS URL.

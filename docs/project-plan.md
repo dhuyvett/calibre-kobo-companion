@@ -244,6 +244,8 @@ COMPANION_CACHE_PATH=/config/cache
 PUBLIC_BASE_URL=http://kobo-companion.local:8080
 LISTEN_HOST=0.0.0.0
 LISTEN_PORT=8080
+TLS_CERT_PATH=/config/tls/fullchain.pem
+TLS_KEY_PATH=/config/tls/privkey.pem
 KOBO_SYNC_PAGE_SIZE=100
 LOG_LEVEL=info
 ALLOW_KOBO_MUTATION_ACKS=true
@@ -285,7 +287,9 @@ Expected idle footprint should be a single small Python process with no worker q
 - Require token on every Kobo endpoint.
 - Validate all file paths against the library root before serving.
 - Set conservative response headers for downloads.
-- Document that the service should normally be exposed only on a trusted LAN or behind TLS/auth at a reverse proxy.
+- Support optional built-in TLS with user-provided certificate and key files, using HTTP as the default for local development and simple trusted-LAN setups.
+- Document that certificates may be obtained by any suitable method as long as the Kobo trusts the issuing CA; keep certificate-provider-specific instructions in separate docs.
+- Document that the service should normally be exposed only on a trusted LAN, over built-in TLS, or behind TLS/auth at a reverse proxy.
 
 ## Testing Plan
 
@@ -316,6 +320,7 @@ Expected idle footprint should be a single small Python process with no worker q
 
 - Manual test on at least one Kobo device by editing `.kobo/Kobo/Kobo eReader.conf`.
 - Validate first sync, subsequent sync, cover display, and download/open behavior.
+- Validate HTTPS sync against built-in TLS using a certificate trusted by the Kobo.
 - Validate behavior when the network mount is temporarily unavailable.
 
 ## Implementation Phases
@@ -360,6 +365,8 @@ Expected idle footprint should be a single small Python process with no worker q
 
 - Add harmless stubs for extra Kobo endpoints observed during device tests.
 - Add network-mount failure handling and clear log messages.
+- Add optional built-in TLS support by wrapping the server socket with Python's standard-library `ssl` module when certificate and key paths are configured.
+- Add TLS startup validation for missing, unreadable, mismatched, or encrypted certificate/key files.
 - Add read-only regression tests.
 - Add resource usage checks on Raspberry Pi.
 
@@ -367,12 +374,15 @@ Expected idle footprint should be a single small Python process with no worker q
 
 - Publish minimal Docker image.
 - Add sample `docker-compose.yml` with library mounted read-only.
-- Add systemd unit example.
+- Add sample TLS-capable deployment examples that mount certificate files read-only.
+- Add systemd unit example, including optional TLS certificate path configuration.
 - Add setup documentation for Kobo device configuration.
+- Add standalone certificate acquisition docs for supported examples, starting with `acme.sh`.
 
 ## Key Risks
 
 - Kobo firmware behavior varies by device and version. Keep compatibility stubs easy to add.
+- Kobo HTTPS certificate trust may vary by firmware and device configuration. Built-in TLS should use standard certificate files, but certificate acquisition and renewal remain deployment responsibilities.
 - Book deletion is hard without server-side per-device known-book state. V1 can ignore deletion propagation or document that removed Calibre books may remain on devices until manually deleted.
 - Network mounts may expose stale SQLite views or transient errors. Use short-lived read-only connections and clear retry behavior.
 - Kobo may require KEPUB for the best reading experience. Download-time conversion solves this without modifying the Calibre library, but it can add latency and CPU load on Raspberry Pi hardware.
