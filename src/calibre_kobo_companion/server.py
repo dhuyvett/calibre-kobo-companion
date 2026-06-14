@@ -4,19 +4,34 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from socketserver import BaseServer
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
+from .calibre import CalibreLibrary
 from .config import Settings
 from .db import is_device_token_active
+from .kobo import (
+    book_metadata,
+    build_library_sync_payload,
+    decode_sync_token,
+)
+
+
+@dataclass(frozen=True)
+class JsonResponse:
+    status: HTTPStatus
+    payload: dict[str, Any]
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def handle_get(
     path: str,
     settings: Settings | None = None,
-) -> tuple[HTTPStatus, dict[str, Any]]:
+    headers: Mapping[str, str] | None = None,
+) -> JsonResponse:
     if path == "/health":
-        return (
+        return JsonResponse(
             HTTPStatus.OK,
             {
                 "status": "ok",
@@ -31,14 +46,25 @@ def handle_get(
             if auth_error is not None:
                 return auth_error
             if resource_path == "/v1/initialization":
-                return HTTPStatus.OK, _initialization_payload(settings, token)
-    return HTTPStatus.NOT_FOUND, {"error": "not_found"}
+                return JsonResponse(HTTPStatus.OK, _initialization_payload(settings, token))
+            if resource_path == "/v1/library/sync":
+                return _library_sync_response(settings, token, headers)
+            metadata_prefix = "/v1/library/"
+            metadata_suffix = "/metadata"
+            if resource_path.startswith(metadata_prefix) and resource_path.endswith(
+                metadata_suffix
+            ):
+                book_uuid = resource_path[
+                    len(metadata_prefix) : -len(metadata_suffix)
+                ]
+                return _book_metadata_response(settings, token, book_uuid)
+    return JsonResponse(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
 
-def handle_post(path: str, settings: Settings) -> tuple[HTTPStatus, dict[str, Any]]:
+def handle_post(path: str, settings: Settings) -> JsonResponse:
     route = _parse_kobo_route(path)
     if route is None:
-        return HTTPStatus.NOT_FOUND, {"error": "not_found"}
+        return JsonResponse(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     token, resource_path = route
     auth_error = _validate_kobo_token(settings, token)
@@ -46,7 +72,7 @@ def handle_post(path: str, settings: Settings) -> tuple[HTTPStatus, dict[str, An
         return auth_error
 
     if resource_path in {"/v1/auth/device", "/v1/auth/refresh"}:
-        return (
+        return JsonResponse(
             HTTPStatus.OK,
             {
                 "AccessToken": f"dummy-{token}",
@@ -55,7 +81,7 @@ def handle_post(path: str, settings: Settings) -> tuple[HTTPStatus, dict[str, An
             },
         )
 
-    return HTTPStatus.NOT_FOUND, {"error": "not_found"}
+    return JsonResponse(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
 
 class CompanionServer(ThreadingHTTPServer):
@@ -70,22 +96,24 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
     server: CompanionServer
 
     def do_GET(self) -> None:
-        status, payload = handle_get(self.path, self.server.settings)
-        self._send_json(status, payload)
+        response = handle_get(self.path, self.server.settings, self.headers)
+        self._send_json(response)
 
     def do_POST(self) -> None:
         self._discard_request_body()
-        status, payload = handle_post(self.path, self.server.settings)
-        self._send_json(status, payload)
+        response = handle_post(self.path, self.server.settings)
+        self._send_json(response)
 
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, sort_keys=True).encode("utf-8")
-        self.send_response(status)
+    def _send_json(self, response: JsonResponse) -> None:
+        body = json.dumps(response.payload, sort_keys=True).encode("utf-8")
+        self.send_response(response.status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in response.headers.items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -122,10 +150,10 @@ def _parse_kobo_route(path: str) -> tuple[str, str] | None:
 def _validate_kobo_token(
     settings: Settings,
     token: str,
-) -> tuple[HTTPStatus, dict[str, Any]] | None:
+) -> JsonResponse | None:
     if is_device_token_active(settings.companion_db_path, token):
         return None
-    return HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"}
+    return JsonResponse(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
 
 
 def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
@@ -140,3 +168,43 @@ def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
             "LibrarySync": f"{base_url}/v1/library/sync",
         }
     }
+
+
+def _library_sync_response(
+    settings: Settings,
+    token: str,
+    headers: Mapping[str, str] | None,
+) -> JsonResponse:
+    library = CalibreLibrary(settings.calibre_library_path)
+    sync_token = decode_sync_token(_header_value(headers, "x-kobo-synctoken"))
+    payload, response_headers = build_library_sync_payload(
+        library.list_books(),
+        settings,
+        token,
+        sync_token,
+    )
+    return JsonResponse(HTTPStatus.OK, payload, response_headers)
+
+
+def _book_metadata_response(
+    settings: Settings,
+    token: str,
+    book_uuid: str,
+) -> JsonResponse:
+    library = CalibreLibrary(settings.calibre_library_path)
+    book = library.get_book_by_uuid(book_uuid)
+    if book is None:
+        return JsonResponse(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+    metadata = book_metadata(book, settings, token)
+    if not metadata:
+        return JsonResponse(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+    return JsonResponse(HTTPStatus.OK, metadata)
+
+
+def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:
+    if headers is None:
+        return None
+    for header_name, value in headers.items():
+        if header_name.lower() == name:
+            return value
+    return None

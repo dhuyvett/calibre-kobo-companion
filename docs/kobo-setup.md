@@ -1,0 +1,153 @@
+# Running the Server and Connecting a Kobo
+
+This guide covers a local development or home-LAN setup. The service is still
+in progress: Kobo initialization, auth, library sync, and book metadata are
+implemented. Book downloads, cover images, compatibility stubs, and packaging
+are not implemented yet.
+
+## Requirements
+
+- Python 3.
+- A Calibre library directory containing `metadata.db`.
+- The machine running this service must be reachable from the Kobo over the
+  same network.
+- The Calibre library should be mounted read-only when possible.
+
+## Choose Paths and URL
+
+Pick three values before starting:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library
+COMPANION_DB_PATH=./data/companion.db
+PUBLIC_BASE_URL=http://192.168.1.50:8080
+```
+
+Use the actual LAN IP address or hostname of the machine running the service
+for `PUBLIC_BASE_URL`. Do not use `localhost` for a real Kobo device because
+that would point the Kobo back at itself.
+
+`COMPANION_DB_PATH` is service-owned writable state. Keep it outside the
+Calibre library.
+
+## Initialize the Companion Database
+
+From the repository root:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PUBLIC_BASE_URL=http://192.168.1.50:8080 \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli init-db
+```
+
+## Create a Kobo Device Token
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PUBLIC_BASE_URL=http://192.168.1.50:8080 \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli token create "Clara BW"
+```
+
+The command prints the token and the Kobo API base URL:
+
+```text
+<token>
+Label: Clara BW
+Kobo API base: http://192.168.1.50:8080/kobo/<token>
+```
+
+Treat the token as a bearer secret. Anyone who can reach the service and knows
+the token can use the Kobo endpoints for that device.
+
+## Start the Server
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PUBLIC_BASE_URL=http://192.168.1.50:8080 \
+LISTEN_HOST=0.0.0.0 \
+LISTEN_PORT=8080 \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
+```
+
+Check the health endpoint from another machine on the same network:
+
+```sh
+curl http://192.168.1.50:8080/health
+```
+
+Expected response:
+
+```json
+{"service": "calibre-kobo-companion", "status": "ok"}
+```
+
+## Configure the Kobo
+
+1. Connect the Kobo to a computer over USB.
+2. Open the mounted Kobo storage.
+3. Find this file:
+
+   ```text
+   .kobo/Kobo/Kobo eReader.conf
+   ```
+
+4. Make a backup copy of the file.
+5. Find or add the `[OneStoreServices]` section.
+6. Set `api_endpoint` to the Kobo API base URL printed by the token command:
+
+   ```ini
+   [OneStoreServices]
+   api_endpoint=http://192.168.1.50:8080/kobo/<token>
+   ```
+
+7. Save the file and safely eject the Kobo.
+8. Disconnect the Kobo and run a sync from the device.
+
+## What Should Work Now
+
+With the current implementation, the Kobo should be able to:
+
+- Request initialization resources from this service.
+- Authenticate through the dummy Kobo auth endpoints.
+- Request library sync.
+- Receive book metadata for EPUB and KEPUB books in the Calibre library.
+
+Downloads and cover image requests are still expected to fail until the file
+and cover endpoints are implemented.
+
+## Token Management
+
+List tokens:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli token list
+```
+
+Revoke a token:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli token revoke <token>
+```
+
+After revoking a token, a Kobo configured with that token will receive
+unauthorized responses from this service.
+
+## Troubleshooting
+
+- If `/health` works locally but not from another device, check firewall rules,
+  the server IP address, `LISTEN_HOST`, and Wi-Fi network isolation.
+- If the Kobo gets unauthorized responses, create a new token or confirm that
+  the token in `api_endpoint` exactly matches an active token.
+- If sync returns no books, confirm the Calibre library contains EPUB or KEPUB
+  formats and that `CALIBRE_LIBRARY_PATH` points at the directory containing
+  `metadata.db`.
+- If the Kobo uses HTTPS-only behavior on a particular firmware version, put
+  the service behind a trusted reverse proxy and set `PUBLIC_BASE_URL` plus
+  `api_endpoint` to the HTTPS URL.

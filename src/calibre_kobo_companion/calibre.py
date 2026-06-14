@@ -102,6 +102,12 @@ class CalibreLibrary:
 
         return self._books_from_rows(rows)
 
+    def get_book_by_uuid(self, uuid: str) -> CalibreBook | None:
+        for book in self.list_books():
+            if book.uuid == uuid:
+                return book
+        return None
+
     def resolve_library_path(self, relative_path: str | Path) -> Path:
         relative = Path(relative_path)
         if relative.is_absolute():
