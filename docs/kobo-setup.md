@@ -4,8 +4,9 @@ This guide covers a local development or home-LAN setup. The service is still
 in progress: Kobo initialization, auth, library sync, and book metadata are
 implemented. Existing EPUB/KEPUB downloads and cover serving are also
 implemented, along with minimal compatibility stubs for common Kobo
-user/assets/analytics requests. KEPUB conversion, full compatibility coverage,
-TLS, and packaging are not implemented yet.
+user/assets/analytics requests. Optional KEPUB conversion through `kepubify`
+is implemented. Full compatibility coverage, TLS, and packaging are not
+implemented yet.
 
 ## Requirements
 
@@ -31,6 +32,18 @@ that would point the Kobo back at itself.
 
 `COMPANION_DB_PATH` is service-owned writable state. Keep it outside the
 Calibre library.
+
+To advertise and serve KEPUB downloads for EPUB-only books, also configure:
+
+```sh
+ENABLE_KEPUBIFY=true
+KEPUBIFY_PATH=/usr/local/bin/kepubify
+COMPANION_CACHE_PATH=./data/cache
+```
+
+Converted files are cached under `COMPANION_CACHE_PATH`, outside the Calibre
+library. If conversion is disabled or not configured, EPUB-only books are
+advertised and served as EPUB.
 
 For HTTPS, use an `https://` `PUBLIC_BASE_URL` and configure the server with
 certificate and key files once built-in TLS support is implemented. The
@@ -122,12 +135,14 @@ With the current implementation, the Kobo should be able to:
 - Request library sync.
 - Receive book metadata for EPUB and KEPUB books in the Calibre library.
 - Download existing EPUB and KEPUB files from the Calibre library.
+- Download converted KEPUB files for EPUB-only books when `kepubify` is
+  enabled.
 - Request cover images from Calibre `cover.jpg` files.
 - Receive harmless empty responses for common user, assets, and analytics
   requests made by Kobo firmware during sync.
 
-EPUB-to-KEPUB conversion is still expected to fail until conversion support is
-implemented. EPUB-only books are currently advertised and served as EPUB.
+EPUB-only books are advertised and served as EPUB unless KEPUB conversion is
+enabled.
 
 ## Token Management
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from .calibre import CalibreLibrary
+from .calibre import CalibreBook, CalibreFormat, CalibreLibrary
 from .config import Settings
 from .db import is_device_token_active
 from .kobo import (
@@ -19,6 +19,7 @@ from .kobo import (
     build_library_sync_payload,
     decode_sync_token,
 )
+from .kepub import KepubConversionError, convert_epub_to_kepub
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,10 @@ def handle_delete(path: str, settings: Settings) -> Response:
     return _handle_kobo_mutating_request(path, settings)
 
 
+def handle_put(path: str, settings: Settings) -> Response:
+    return _handle_kobo_mutating_request(path, settings)
+
+
 def _handle_kobo_mutating_request(path: str, settings: Settings) -> Response:
     route = _parse_kobo_route(path)
     if route is None:
@@ -133,6 +138,9 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         self._handle_request("DELETE")
 
+    def do_PUT(self) -> None:
+        self._handle_request("PUT")
+
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("%s - %s", self.client_address[0], format % args)
 
@@ -146,6 +154,9 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
             elif method == "DELETE":
                 self._discard_request_body()
                 response = handle_delete(self.path, self.server.settings)
+            elif method == "PUT":
+                self._discard_request_body()
+                response = handle_put(self.path, self.server.settings)
             else:
                 response = Response(
                     HTTPStatus.METHOD_NOT_ALLOWED,
@@ -312,10 +323,24 @@ def _download_response(settings: Settings, resource_path: str) -> Response:
 
     for book_format in book.formats:
         if book_format.format == requested_format and book_format.path.is_file():
-            file_name = f"{book.title}.{requested_format.lower()}"
+            return _ebook_file_response(book, book_format, requested_format)
+    if requested_format == "KEPUB":
+        epub_format = _book_format(book, "EPUB")
+        if epub_format is not None:
+            if not settings.enable_kepubify or settings.kepubify_path is None:
+                return _ebook_file_response(book, epub_format, "EPUB")
+            try:
+                conversion = convert_epub_to_kepub(book, epub_format, settings)
+            except KepubConversionError:
+                logger.exception("KEPUB conversion failed for book %s", book.id)
+                return Response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    payload={"error": "kepub_conversion_failed"},
+                )
+            file_name = f"{book.title}.kepub.epub"
             return Response(
                 HTTPStatus.OK,
-                file_path=book_format.path,
+                file_path=conversion.path,
                 content_type=_ebook_content_type(requested_format),
                 headers={
                     "Content-Disposition": f'attachment; filename="{file_name}"',
@@ -378,7 +403,11 @@ def _compatibility_response(resource_path: str) -> Response | None:
         return Response(HTTPStatus.OK, payload={})
     if resource_path.startswith(("/v1/user/loyalty/", "/v1/analytics/")):
         return Response(HTTPStatus.OK, payload={})
-    if resource_path in {"/v1/user/wishlist", "/v1/user/recommendations"}:
+    if resource_path in {
+        "/v1/user/reviews",
+        "/v1/user/wishlist",
+        "/v1/user/recommendations",
+    }:
         return Response(HTTPStatus.OK, payload={})
     return None
 
@@ -406,6 +435,31 @@ def _ebook_content_type(format_name: str) -> str:
     if format_name == "EPUB":
         return "application/epub+zip"
     return "application/vnd.kobo.kepub+zip"
+
+
+def _ebook_file_response(
+    book: CalibreBook,
+    book_format: CalibreFormat,
+    response_format: str,
+) -> Response:
+    extension = "kepub" if response_format == "KEPUB" else "epub"
+    file_name = f"{book.title}.{extension}"
+    return Response(
+        HTTPStatus.OK,
+        file_path=book_format.path,
+        content_type=_ebook_content_type(response_format),
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_name}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _book_format(book: CalibreBook, format_name: str) -> CalibreFormat | None:
+    for book_format in book.formats:
+        if book_format.format == format_name and book_format.path.is_file():
+            return book_format
+    return None
 
 
 def _image_id_matches_book(image_id: str, book_uuid: str) -> bool:

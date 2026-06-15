@@ -14,7 +14,12 @@ from calibre_kobo_companion.db import (
     revoke_device_token,
 )
 from calibre_kobo_companion.kobo import SyncToken, encode_sync_token
-from calibre_kobo_companion.server import handle_delete, handle_get, handle_post
+from calibre_kobo_companion.server import (
+    handle_delete,
+    handle_get,
+    handle_post,
+    handle_put,
+)
 
 
 class ServerTests(TestCase):
@@ -133,6 +138,13 @@ class ServerTests(TestCase):
                 f"/kobo/{device_token.token}/v1/products/featured/",
                 settings,
             )
+            user_reviews_response = handle_get(
+                (
+                    f"/kobo/{device_token.token}/v1/user/reviews"
+                    "?ProductIds=eec4100f-96a8-4245-be72-10e82fc65111"
+                ),
+                settings,
+            )
 
         self.assertEqual(profile_response.status, 200)
         self.assertEqual(assets_response.status, 200)
@@ -140,6 +152,7 @@ class ServerTests(TestCase):
         self.assertEqual(affiliate_response.status, 200)
         self.assertEqual(deals_response.status, 200)
         self.assertEqual(featured_products_response.status, 200)
+        self.assertEqual(user_reviews_response.status, 200)
         self.assertEqual(analytics_response.payload["Result"], "Success")
 
     def test_read_only_kobo_mutations_are_acknowledged(self) -> None:
@@ -162,11 +175,20 @@ class ServerTests(TestCase):
                 ),
                 settings,
             )
+            reading_state_response = handle_put(
+                (
+                    f"/kobo/{device_token.token}/v1/library/"
+                    "d65b0a72-704c-4822-9605-ad837e66fc17/state"
+                ),
+                settings,
+            )
 
         self.assertEqual(delete_book_response.status, 200)
         self.assertEqual(delete_book_response.payload, {})
         self.assertEqual(tag_delete_response.status, 200)
         self.assertEqual(tag_delete_response.payload, {})
+        self.assertEqual(reading_state_response.status, 200)
+        self.assertEqual(reading_state_response.payload, {})
 
     def test_revoked_token_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
@@ -332,6 +354,43 @@ class ServerTests(TestCase):
             {"Generic"},
         )
 
+    def test_book_metadata_advertises_kepub_for_epub_only_book_when_conversion_enabled(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            kepubify_path = _write_fake_kepubify(Path(directory))
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                enable_kepubify=True,
+                kepubify_path=kepubify_path,
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            response = handle_get(
+                (
+                    f"/kobo/{device_token.token}/v1/library/"
+                    f"{fixture.books[1].uuid}/metadata"
+                ),
+                settings,
+            )
+
+        self.assertEqual(response.status, 200)
+        metadata = response.payload[0]
+        self.assertEqual(
+            [download["Format"] for download in metadata["DownloadUrls"]],
+            ["KEPUB"],
+        )
+        self.assertEqual(
+            metadata["DownloadUrls"][0]["Url"],
+            (
+                f"http://example.test/kobo/{device_token.token}"
+                f"/download/{fixture.books[1].id}/kepub"
+            ),
+        )
+
     def test_book_metadata_returns_not_found_for_unknown_uuid(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory) / "library")
@@ -384,7 +443,7 @@ class ServerTests(TestCase):
         self.assertEqual(response.content_type, "application/vnd.kobo.kepub+zip")
         self.assertEqual(response_body, b"Existing Kepub fixture KEPUB\n")
 
-    def test_download_returns_not_found_for_missing_format(self) -> None:
+    def test_download_falls_back_to_epub_when_kepub_conversion_is_disabled(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory) / "library")
             settings = _settings(Path(directory), library_path=fixture.root)
@@ -395,9 +454,83 @@ class ServerTests(TestCase):
                 f"/kobo/{device_token.token}/download/{fixture.books[1].id}/kepub",
                 settings,
             )
+            self.assertIsNotNone(response.file_path)
+            response_body = response.file_path.read_bytes()
 
-        self.assertEqual(response.status, 404)
-        self.assertEqual(response.payload, {"error": "not_found"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.content_type, "application/epub+zip")
+        self.assertEqual(response_body, b"Epub Only fixture EPUB\n")
+
+    def test_download_converts_epub_only_book_to_kepub_and_uses_cache(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = create_calibre_fixture_library(root / "library")
+            kepubify_path = _write_fake_kepubify(root)
+            settings = _settings(
+                root,
+                library_path=fixture.root,
+                enable_kepubify=True,
+                kepubify_path=kepubify_path,
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            first_response = handle_get(
+                f"/kobo/{device_token.token}/download/{fixture.books[1].id}/kepub",
+                settings,
+            )
+            self.assertIsNotNone(first_response.file_path)
+            first_path = first_response.file_path
+            first_body = first_path.read_bytes()
+
+            second_response = handle_get(
+                f"/kobo/{device_token.token}/download/{fixture.books[1].id}/kepub",
+                settings,
+            )
+            self.assertIsNotNone(second_response.file_path)
+            second_path = second_response.file_path
+            second_body = second_path.read_bytes()
+            kepubify_runs = (root / "kepubify-runs.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(first_response.status, 200)
+        self.assertEqual(first_response.content_type, "application/vnd.kobo.kepub+zip")
+        self.assertEqual(first_body, b"converted:Epub Only fixture EPUB\n")
+        self.assertEqual(second_response.status, 200)
+        self.assertEqual(second_body, first_body)
+        self.assertEqual(second_path, first_path)
+        self.assertEqual(kepubify_runs.count("run\n"), 1)
+
+    def test_kepub_conversion_does_not_modify_calibre_library_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = create_calibre_fixture_library(root / "library")
+            epub_path = (
+                fixture.root
+                / fixture.books[1].relative_path
+                / "Epub Only - Grace Hopper.epub"
+            )
+            before_db_mtime = fixture.metadata_db_path.stat().st_mtime_ns
+            before_epub_mtime = epub_path.stat().st_mtime_ns
+            kepubify_path = _write_fake_kepubify(root)
+            settings = _settings(
+                root,
+                library_path=fixture.root,
+                enable_kepubify=True,
+                kepubify_path=kepubify_path,
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            response = handle_get(
+                f"/kobo/{device_token.token}/download/{fixture.books[1].id}/kepub",
+                settings,
+            )
+            after_db_mtime = fixture.metadata_db_path.stat().st_mtime_ns
+            after_epub_mtime = epub_path.stat().st_mtime_ns
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(after_db_mtime, before_db_mtime)
+        self.assertEqual(after_epub_mtime, before_epub_mtime)
 
     def test_cover_endpoint_serves_cover_by_uuid(self) -> None:
         with TemporaryDirectory() as directory:
@@ -481,6 +614,8 @@ def _settings(
     *,
     library_path: Path | None = None,
     kobo_sync_page_size: int = 100,
+    enable_kepubify: bool = False,
+    kepubify_path: Path | None = None,
 ) -> Settings:
     return Settings(
         calibre_library_path=library_path or directory / "library",
@@ -488,4 +623,32 @@ def _settings(
         companion_cache_path=directory / "cache",
         public_base_url="http://example.test",
         kobo_sync_page_size=kobo_sync_page_size,
+        enable_kepubify=enable_kepubify,
+        kepubify_path=kepubify_path,
     )
+
+
+def _write_fake_kepubify(directory: Path) -> Path:
+    script_path = directory / "fake-kepubify.py"
+    log_path = directory / "kepubify-runs.txt"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "from pathlib import Path",
+                "import sys",
+                "",
+                "output_dir = Path(sys.argv[sys.argv.index('-o') + 1])",
+                "source_path = Path(sys.argv[-1])",
+                f"log_path = Path({str(log_path)!r})",
+                "log_path.write_text(log_path.read_text(encoding='utf-8') + 'run\\n' if log_path.exists() else 'run\\n', encoding='utf-8')",
+                "output_dir.mkdir(parents=True, exist_ok=True)",
+                "output_path = output_dir / f'{source_path.stem}.kepub.epub'",
+                "output_path.write_bytes(b'converted:' + source_path.read_bytes())",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+    return script_path

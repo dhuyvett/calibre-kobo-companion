@@ -105,7 +105,8 @@ def book_metadata(
     base_url = f"{settings.public_base_url}/kobo/{token}"
     contributors = list(book.authors)
     contributor_roles = [{"Name": author} for author in book.authors]
-    download_url = f"{base_url}/download/{book.id}/{selected_format.format.lower()}"
+    advertised_format = _advertised_download_format(book, selected_format, settings)
+    download_url = f"{base_url}/download/{book.id}/{advertised_format.lower()}"
     download_urls = [
         {
             "Format": kobo_format,
@@ -113,7 +114,7 @@ def book_metadata(
             "Url": download_url,
             "Platform": "Generic",
         }
-        for kobo_format in _kobo_download_formats(selected_format.format)
+        for kobo_format in _kobo_download_formats(advertised_format)
     ]
 
     metadata: dict[str, Any] = {
@@ -173,6 +174,21 @@ def _select_download_format(book: CalibreBook) -> CalibreFormat | None:
         if format_name in formats_by_name:
             return formats_by_name[format_name]
     return None
+
+
+def _advertised_download_format(
+    book: CalibreBook,
+    selected_format: CalibreFormat,
+    settings: Settings,
+) -> str:
+    if (
+        selected_format.format == "EPUB"
+        and settings.enable_kepubify
+        and settings.kepubify_path is not None
+        and not any(book_format.format == "KEPUB" for book_format in book.formats)
+    ):
+        return "KEPUB"
+    return selected_format.format
 
 
 def _kobo_download_formats(format_name: str) -> tuple[str, ...]:
