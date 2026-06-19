@@ -21,6 +21,10 @@ class ConfigTests(TestCase):
             "COMPANION_CACHE_PATH": "/tmp/cache",
             "PUBLIC_BASE_URL": "http://example.test/",
             "LISTEN_PORT": "9090",
+            "KOBO_SYNC_MODE": "hybrid",
+            "KOBO_STORE_API_URL": "https://store.example.test/",
+            "KOBO_PROXY_TIMEOUT_SECONDS": "12",
+            "HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY": "true",
             "ENABLE_KEPUBIFY": "true",
             "KEPUBIFY_PATH": "/usr/local/bin/kepubify",
             "TLS_CERT_PATH": "/tmp/tls/fullchain.pem",
@@ -35,6 +39,10 @@ class ConfigTests(TestCase):
         self.assertEqual(settings.companion_cache_path, Path("/tmp/cache"))
         self.assertEqual(settings.public_base_url, "http://example.test")
         self.assertEqual(settings.listen_port, 9090)
+        self.assertEqual(settings.kobo_sync_mode, "hybrid")
+        self.assertEqual(settings.kobo_store_api_url, "https://store.example.test")
+        self.assertEqual(settings.kobo_proxy_timeout_seconds, 12)
+        self.assertTrue(settings.hybrid_sync_require_local_library)
         self.assertTrue(settings.enable_kepubify)
         self.assertEqual(settings.kepubify_path, Path("/usr/local/bin/kepubify"))
         self.assertTrue(settings.tls_enabled)
@@ -49,4 +57,14 @@ class ConfigTests(TestCase):
 
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaisesRegex(ConfigError, "TLS_CERT_PATH and TLS_KEY_PATH"):
+                load_settings()
+
+    def test_kobo_sync_mode_must_be_valid(self) -> None:
+        env = {
+            "CALIBRE_LIBRARY_PATH": "/tmp/library",
+            "KOBO_SYNC_MODE": "invalid",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ConfigError, "KOBO_SYNC_MODE"):
                 load_settings()

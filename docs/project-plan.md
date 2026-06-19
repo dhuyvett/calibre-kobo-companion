@@ -146,6 +146,9 @@ The token is a random server-generated secret. Users configure the Kobo device's
   - Return `NewEntitlement` or `ChangedEntitlement` records with `BookEntitlement` and `BookMetadata`.
   - Return at most a configured page size, default `100`, and set `x-kobo-sync: continue` when more records remain.
   - Write a new `x-kobo-synctoken` response header.
+  - In hybrid sync mode, proxy the official Kobo library sync first, then merge
+    local Calibre entitlements into the returned payload so Kobo Store and
+    OverDrive/Libby content can continue to sync.
 
 - `GET /kobo/{token}/v1/library/{book_uuid}/metadata`
   - Return metadata for one Calibre book UUID.
@@ -171,6 +174,72 @@ Return small success/empty responses for endpoints Kobo devices call but this se
 - reading-state writes
 
 For mutation-like Kobo requests, return success only when harmless for the device. Log at debug level that the request was ignored because the service is read-only.
+
+## Hybrid Kobo Sync
+
+Hybrid sync should preserve official Kobo account/library behavior while adding
+Calibre books to the same device sync. This is required for Kobo Store books and
+OverDrive/Libby loans that are managed by Kobo's servers.
+
+Recommended behavior:
+
+- Keep `KOBO_SYNC_MODE=local` as the default. Add `KOBO_SYNC_MODE=hybrid` for
+  proxy-plus-merge behavior.
+- In hybrid mode, forward the device's official auth/session context to
+  Kobo's Store API for official library sync. Preserve headers such as
+  `Authorization`, `x-kobo-userkey`, `x-kobo-deviceid`, `x-kobo-apitoken`,
+  `x-kobo-synctoken`, `User-Agent`, and `Accept-Language`. Never log these
+  values.
+- Preserve query parameters such as `Filter`, `DownloadUrlFilter`, and
+  `PrioritizeRecentReads` when proxying `GET /v1/library/sync`.
+- If the official Kobo sync returns an auth/session failure, pass that failure
+  through to the device instead of hiding it.
+- If official sync succeeds, append locally generated Calibre entitlements to
+  the official Kobo payload. Local download URLs must continue to point at this
+  service.
+- Use Calibre `books.uuid` for local entitlement IDs and avoid rewriting
+  official Kobo/OverDrive IDs.
+- Route metadata requests by ID: serve local Calibre UUIDs locally and proxy
+  unknown IDs to Kobo in hybrid mode.
+- Continue to acknowledge read-only local mutation/state endpoints for local
+  Calibre IDs. Proxy or leave native official Kobo state endpoints for
+  non-local IDs.
+
+Hybrid sync-token handling:
+
+- Keep official Kobo sync state and local Calibre sync state separate inside a
+  composite token, for example:
+
+```json
+{
+  "version": 3,
+  "mode": "hybrid",
+  "phase": "kobo",
+  "kobo": "<raw official x-kobo-synctoken>",
+  "local": {"since": "2024-01-01 00:00:00+00:00", "offset": 0}
+}
+```
+
+- If the device sends a raw Kobo token, forward it to Kobo and treat the local
+  Calibre sync as a first local sync.
+- If the device sends a composite token, extract and forward only the official
+  Kobo token to Kobo, then update the composite token with Kobo's returned
+  token and the local Calibre continuation state.
+- Return `x-kobo-sync: continue` while either the official Kobo sync or local
+  Calibre sync has more pages. Stop only when both are complete.
+- Design the token format so local mode can keep using the existing lightweight
+  token unless hybrid mode is enabled.
+
+Failure policy:
+
+- If Kobo's Store API is unavailable in hybrid mode, return a clear upstream
+  error such as `502` or `503` with `kobo_store_unavailable`.
+- If the Calibre library is unavailable but official Kobo sync succeeds, prefer
+  returning the official Kobo sync result and logging the local failure. Add a
+  strict option such as `HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY=true` only if users
+  need sync to fail when local books cannot be queried.
+- Keep timeout and retry behavior short and request-scoped; do not add a
+  background sync worker.
 
 ## Metadata Mapping
 
@@ -247,6 +316,10 @@ LISTEN_PORT=8080
 TLS_CERT_PATH=/config/tls/fullchain.pem
 TLS_KEY_PATH=/config/tls/privkey.pem
 KOBO_SYNC_PAGE_SIZE=100
+KOBO_SYNC_MODE=local
+KOBO_STORE_API_URL=https://storeapi.kobo.com
+KOBO_PROXY_TIMEOUT_SECONDS=20
+HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY=false
 LOG_LEVEL=info
 ALLOW_KOBO_MUTATION_ACKS=true
 ENABLE_KEPUBIFY=true
@@ -303,6 +376,11 @@ Expected idle footprint should be a single small Python process with no worker q
 - Path resolution rejects traversal and stale database paths.
 - KEPUB cache key changes when source EPUB size or mtime changes.
 - Conversion command failures never create or update files inside the Calibre library.
+- Hybrid sync-token parse/build compatibility, including raw Kobo tokens and
+  composite local/Kobo tokens.
+- Hybrid sync payload merge behavior and continuation header selection.
+- Hybrid metadata routing: local Calibre UUIDs are served locally, unknown IDs
+  are proxied to Kobo.
 
 ### Integration Tests
 
@@ -315,6 +393,8 @@ Expected idle footprint should be a single small Python process with no worker q
 - Repeated KEPUB download uses companion cache when enabled.
 - Cover endpoint returns image bytes.
 - Calibre library mounted/readable as read-only remains unchanged.
+- Hybrid sync proxies official Kobo sync, merges local entitlements, preserves
+  official auth failure responses, and does not log bearer/user-key headers.
 
 ### Device Validation
 
@@ -322,6 +402,8 @@ Expected idle footprint should be a single small Python process with no worker q
 - Validate first sync, subsequent sync, cover display, and download/open behavior.
 - Validate HTTPS sync against built-in TLS using a certificate trusted by the Kobo.
 - Validate behavior when the network mount is temporarily unavailable.
+- Validate hybrid sync with at least one official Kobo Store book or
+  OverDrive/Libby loan active on the device.
 
 ## Implementation Phases
 
@@ -370,7 +452,24 @@ Expected idle footprint should be a single small Python process with no worker q
 - Add read-only regression tests.
 - Add resource usage checks on Raspberry Pi.
 
-### Phase 7: Packaging
+### Phase 7: Hybrid Kobo Sync
+
+- Add `KOBO_SYNC_MODE=local|hybrid` and proxy timeout configuration.
+- Implement a small standard-library HTTP proxy helper for Kobo Store API
+  requests, forwarding only required auth/session headers and query params.
+- Implement composite hybrid sync tokens that preserve official Kobo sync state
+  separately from local Calibre sync state.
+- Proxy official Kobo library sync first, then merge local Calibre entitlements
+  into the payload.
+- Preserve continuation semantics when either official Kobo sync or local
+  Calibre sync has more pages.
+- Route metadata/state requests by ID so local Calibre UUIDs stay local and
+  official Kobo/OverDrive IDs are proxied or left native.
+- Add tests for auth failures, proxy failures, token composition, payload
+  merging, continuation, and no secret header logging.
+- Validate on a Kobo device with an active Kobo Store or OverDrive/Libby item.
+
+### Phase 8: Packaging
 
 - Publish minimal Docker image.
 - Add sample `docker-compose.yml` with library mounted read-only.

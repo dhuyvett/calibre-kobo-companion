@@ -19,10 +19,14 @@ from .calibre import CalibreBook, CalibreFormat, CalibreLibrary, CalibreLibraryE
 from .config import ConfigError, Settings
 from .db import is_device_token_active
 from .kobo import (
+    HybridSyncToken,
     book_metadata,
     build_library_sync_payload,
+    decode_hybrid_sync_token,
     decode_sync_token,
+    encode_hybrid_sync_token,
 )
+from .kobo_proxy import KoboStoreUnavailable, proxy_kobo_get
 from .kepub import KepubConversionError, convert_epub_to_kepub
 
 
@@ -70,7 +74,7 @@ def handle_get(
                     headers={"x-kobo-apitoken": "e30="},
                 )
             if resource_path == "/v1/library/sync":
-                return _library_sync_response(settings, token, headers)
+                return _library_sync_response(settings, token, path, headers)
             metadata_prefix = "/v1/library/"
             metadata_suffix = "/metadata"
             if resource_path.startswith(metadata_prefix) and resource_path.endswith(
@@ -439,6 +443,17 @@ def _native_kobo_resources() -> dict[str, Any]:
 def _library_sync_response(
     settings: Settings,
     token: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    if settings.kobo_sync_mode == "hybrid":
+        return _hybrid_library_sync_response(settings, token, request_path, headers)
+    return _local_library_sync_response(settings, token, headers)
+
+
+def _local_library_sync_response(
+    settings: Settings,
+    token: str,
     headers: Mapping[str, str] | None,
 ) -> Response:
     library = CalibreLibrary(settings.calibre_library_path)
@@ -451,6 +466,94 @@ def _library_sync_response(
     logger.info(
         "Kobo library sync returned %s item(s), continue=%s",
         len(payload),
+        response_headers.get("x-kobo-sync") == "continue",
+    )
+    return Response(HTTPStatus.OK, payload=payload, headers=response_headers)
+
+
+def _hybrid_library_sync_response(
+    settings: Settings,
+    token: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    request_sync_token = _header_value(headers, "x-kobo-synctoken")
+    hybrid_token = decode_hybrid_sync_token(request_sync_token)
+    parsed_path = urlparse(request_path)
+
+    try:
+        kobo_response = proxy_kobo_get(
+            "/v1/library/sync",
+            parsed_path.query,
+            headers,
+            settings,
+            sync_token=hybrid_token.kobo,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid sync: %s", exc)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+
+    if kobo_response.status >= 400:
+        return Response(
+            _http_status(kobo_response.status),
+            payload=kobo_response.payload,
+            headers=_hybrid_passthrough_headers(kobo_response.headers),
+        )
+
+    official_payload = (
+        list(kobo_response.payload)
+        if isinstance(kobo_response.payload, list)
+        else kobo_response.payload
+    )
+    if not isinstance(official_payload, list):
+        return Response(
+            _http_status(kobo_response.status),
+            payload=official_payload,
+            headers=_hybrid_passthrough_headers(kobo_response.headers),
+        )
+
+    local_payload: list[dict[str, Any]] = []
+    local_headers: dict[str, str] = {}
+    try:
+        books = CalibreLibrary(settings.calibre_library_path).list_books()
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        if settings.hybrid_sync_require_local_library:
+            return _calibre_unavailable_response(settings, "hybrid local sync", exc)
+        logger.warning(
+            "Calibre library unavailable during hybrid local sync at %s: %s",
+            settings.calibre_library_path,
+            exc,
+        )
+    else:
+        local_payload, local_headers = build_library_sync_payload(
+            books,
+            settings,
+            token,
+            hybrid_token.local,
+        )
+
+    next_kobo_token = _case_insensitive_header(kobo_response.headers, "x-kobo-synctoken")
+    next_local_token = decode_sync_token(local_headers.get("x-kobo-synctoken"))
+    response_headers = _hybrid_passthrough_headers(kobo_response.headers)
+    response_headers["x-kobo-synctoken"] = encode_hybrid_sync_token(
+        HybridSyncToken(kobo=next_kobo_token, local=next_local_token)
+    )
+    if (
+        _case_insensitive_header(kobo_response.headers, "x-kobo-sync") == "continue"
+        or local_headers.get("x-kobo-sync") == "continue"
+    ):
+        response_headers["x-kobo-sync"] = "continue"
+    else:
+        response_headers.pop("x-kobo-sync", None)
+
+    payload = official_payload + local_payload
+    logger.info(
+        "Hybrid Kobo library sync returned %s official item(s), %s local item(s), continue=%s",
+        len(official_payload),
+        len(local_payload),
         response_headers.get("x-kobo-sync") == "continue",
     )
     return Response(HTTPStatus.OK, payload=payload, headers=response_headers)
@@ -607,6 +710,29 @@ def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:
         if header_name.lower() == name:
             return value
     return None
+
+
+def _case_insensitive_header(headers: Mapping[str, str], name: str) -> str | None:
+    for header_name, value in headers.items():
+        if header_name.lower() == name.lower():
+            return value
+    return None
+
+
+def _hybrid_passthrough_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    passthrough = {}
+    for name in ("x-kobo-synctoken", "x-kobo-sync"):
+        value = _case_insensitive_header(headers, name)
+        if value is not None:
+            passthrough[name] = value
+    return passthrough
+
+
+def _http_status(status: int) -> HTTPStatus:
+    try:
+        return HTTPStatus(status)
+    except ValueError:
+        return HTTPStatus.BAD_GATEWAY
 
 
 def _ebook_content_type(format_name: str) -> str:

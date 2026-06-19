@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
 from typing import Any
@@ -12,6 +12,7 @@ from .config import Settings
 
 SUPPORTED_FORMATS = ("KEPUB", "EPUB")
 SYNC_TOKEN_VERSION = 2
+HYBRID_SYNC_TOKEN_VERSION = 3
 DEFAULT_KOBO_CATEGORY = "00000000-0000-0000-0000-000000000001"
 
 
@@ -19,6 +20,12 @@ DEFAULT_KOBO_CATEGORY = "00000000-0000-0000-0000-000000000001"
 class SyncToken:
     since: str | None = None
     offset: int = 0
+
+
+@dataclass(frozen=True)
+class HybridSyncToken:
+    kobo: str | None = None
+    local: SyncToken = field(default_factory=SyncToken)
 
 
 def encode_sync_token(token: SyncToken) -> str:
@@ -51,6 +58,53 @@ def decode_sync_token(value: str | None) -> SyncToken:
     if not isinstance(offset, int) or offset < 0:
         offset = 0
     return SyncToken(since=since, offset=offset)
+
+
+def encode_hybrid_sync_token(token: HybridSyncToken) -> str:
+    payload = {
+        "version": HYBRID_SYNC_TOKEN_VERSION,
+        "mode": "hybrid",
+        "kobo": token.kobo,
+        "local": {
+            "since": token.local.since,
+            "offset": token.local.offset,
+        },
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_hybrid_sync_token(value: str | None) -> HybridSyncToken:
+    if not value:
+        return HybridSyncToken()
+    try:
+        padded = value + ("=" * (-len(value) % 4))
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return HybridSyncToken(kobo=value)
+
+    if (
+        payload.get("version") != HYBRID_SYNC_TOKEN_VERSION
+        or payload.get("mode") != "hybrid"
+    ):
+        return HybridSyncToken(kobo=value)
+
+    kobo = payload.get("kobo")
+    if not isinstance(kobo, str | type(None)):
+        kobo = None
+
+    local_payload = payload.get("local")
+    if not isinstance(local_payload, dict):
+        return HybridSyncToken(kobo=kobo)
+
+    since = local_payload.get("since")
+    offset = local_payload.get("offset", 0)
+    if not isinstance(since, str | type(None)):
+        since = None
+    if not isinstance(offset, int) or offset < 0:
+        offset = 0
+    return HybridSyncToken(kobo=kobo, local=SyncToken(since=since, offset=offset))
 
 
 def build_library_sync_payload(

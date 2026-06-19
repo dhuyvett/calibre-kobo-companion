@@ -10,6 +10,8 @@ DEFAULT_LISTEN_PORT = 8080
 DEFAULT_SYNC_PAGE_SIZE = 100
 DEFAULT_KEPUB_CACHE_MAX_MB = 1024
 DEFAULT_KEPUB_CONVERSION_TIMEOUT_SECONDS = 120
+DEFAULT_KOBO_STORE_API_URL = "https://storeapi.kobo.com"
+DEFAULT_KOBO_PROXY_TIMEOUT_SECONDS = 20
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -41,6 +43,10 @@ class Settings:
     listen_host: str = DEFAULT_LISTEN_HOST
     listen_port: int = DEFAULT_LISTEN_PORT
     kobo_sync_page_size: int = DEFAULT_SYNC_PAGE_SIZE
+    kobo_sync_mode: str = "local"
+    kobo_store_api_url: str = DEFAULT_KOBO_STORE_API_URL
+    kobo_proxy_timeout_seconds: int = DEFAULT_KOBO_PROXY_TIMEOUT_SECONDS
+    hybrid_sync_require_local_library: bool = False
     log_level: str = "info"
     allow_kobo_mutation_acks: bool = True
     enable_kepubify: bool = False
@@ -79,6 +85,19 @@ def load_settings() -> Settings:
         listen_host=os.environ.get("LISTEN_HOST", DEFAULT_LISTEN_HOST),
         listen_port=_int_from_env("LISTEN_PORT", default=DEFAULT_LISTEN_PORT),
         kobo_sync_page_size=_int_from_env("KOBO_SYNC_PAGE_SIZE", default=DEFAULT_SYNC_PAGE_SIZE),
+        kobo_sync_mode=os.environ.get("KOBO_SYNC_MODE", "local").strip().lower(),
+        kobo_store_api_url=os.environ.get(
+            "KOBO_STORE_API_URL",
+            DEFAULT_KOBO_STORE_API_URL,
+        ).rstrip("/"),
+        kobo_proxy_timeout_seconds=_int_from_env(
+            "KOBO_PROXY_TIMEOUT_SECONDS",
+            default=DEFAULT_KOBO_PROXY_TIMEOUT_SECONDS,
+        ),
+        hybrid_sync_require_local_library=_bool_from_env(
+            os.environ.get("HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY"),
+            default=False,
+        ),
         log_level=os.environ.get("LOG_LEVEL", "info"),
         allow_kobo_mutation_acks=_bool_from_env(
             os.environ.get("ALLOW_KOBO_MUTATION_ACKS"),
@@ -103,6 +122,10 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("LISTEN_PORT must be between 1 and 65535")
     if settings.kobo_sync_page_size < 1:
         raise ConfigError("KOBO_SYNC_PAGE_SIZE must be greater than zero")
+    if settings.kobo_sync_mode not in {"local", "hybrid"}:
+        raise ConfigError("KOBO_SYNC_MODE must be local or hybrid")
+    if settings.kobo_proxy_timeout_seconds < 1:
+        raise ConfigError("KOBO_PROXY_TIMEOUT_SECONDS must be greater than zero")
     if settings.kepub_cache_max_mb < 0:
         raise ConfigError("KEPUB_CACHE_MAX_MB must not be negative")
     if settings.kepub_conversion_timeout_seconds < 1:
