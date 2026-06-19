@@ -10,6 +10,10 @@ class CalibreLibraryError(RuntimeError):
     """Raised when a Calibre library cannot be read safely."""
 
 
+class CalibreLibraryUnavailable(CalibreLibraryError):
+    """Raised when the Calibre library is temporarily unavailable."""
+
+
 class UnsafeCalibrePath(CalibreLibraryError):
     """Raised when Calibre metadata points outside the library root."""
 
@@ -49,6 +53,10 @@ class CalibreLibrary:
         self.metadata_db_path = self.root / "metadata.db"
 
     def connect(self) -> sqlite3.Connection:
+        if not self.metadata_db_path.is_file():
+            raise CalibreLibraryUnavailable(
+                f"Calibre metadata database is not available: {self.metadata_db_path}"
+            )
         uri = f"{self.metadata_db_path.as_uri()}?mode=ro"
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row

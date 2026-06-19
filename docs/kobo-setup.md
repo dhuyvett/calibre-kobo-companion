@@ -195,6 +195,8 @@ unauthorized responses from this service.
 - If sync returns no books, confirm the Calibre library contains EPUB or KEPUB
   formats and that `CALIBRE_LIBRARY_PATH` points at the directory containing
   `metadata.db`.
+- If logs show `calibre_library_unavailable`, confirm the Calibre library or
+  network mount is available and that `metadata.db` is readable by the service.
 - If the Kobo cannot connect over HTTPS, confirm the certificate hostname
   matches `PUBLIC_BASE_URL`, both TLS files are readable by the service, and
   the Kobo trusts the certificate chain.

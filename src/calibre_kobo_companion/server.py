@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import secrets
 import shutil
+import sqlite3
 import ssl
 from socketserver import BaseServer
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from .calibre import CalibreBook, CalibreFormat, CalibreLibrary
+from .calibre import CalibreBook, CalibreFormat, CalibreLibrary, CalibreLibraryError
 from .config import ConfigError, Settings
 from .db import is_device_token_active
 from .kobo import (
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 KOBO_STORE_API_URL = "https://storeapi.kobo.com"
 KOBO_AUTHORIZE_URL = "https://authorize.kobo.com"
 KOBO_WEB_URL = "https://www.kobo.com"
+_CALIBRE_UNAVAILABLE_EXCEPTIONS = (CalibreLibraryError, OSError, sqlite3.Error)
 
 
 @dataclass(frozen=True)
@@ -299,6 +301,23 @@ def _validate_kobo_token(
     return Response(HTTPStatus.UNAUTHORIZED, payload={"error": "unauthorized"})
 
 
+def _calibre_unavailable_response(
+    settings: Settings,
+    operation: str,
+    exc: BaseException,
+) -> Response:
+    logger.warning(
+        "Calibre library unavailable during %s at %s: %s",
+        operation,
+        settings.calibre_library_path,
+        exc,
+    )
+    return Response(
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        payload={"error": "calibre_library_unavailable"},
+    )
+
+
 def _auth_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
     user_key = ""
     if payload is not None and isinstance(payload.get("UserKey"), str):
@@ -424,12 +443,11 @@ def _library_sync_response(
 ) -> Response:
     library = CalibreLibrary(settings.calibre_library_path)
     sync_token = decode_sync_token(_header_value(headers, "x-kobo-synctoken"))
-    payload, response_headers = build_library_sync_payload(
-        library.list_books(),
-        settings,
-        token,
-        sync_token,
-    )
+    try:
+        books = library.list_books()
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        return _calibre_unavailable_response(settings, "library sync", exc)
+    payload, response_headers = build_library_sync_payload(books, settings, token, sync_token)
     logger.info(
         "Kobo library sync returned %s item(s), continue=%s",
         len(payload),
@@ -444,7 +462,10 @@ def _book_metadata_response(
     book_uuid: str,
 ) -> Response:
     library = CalibreLibrary(settings.calibre_library_path)
-    book = library.get_book_by_uuid(book_uuid)
+    try:
+        book = library.get_book_by_uuid(book_uuid)
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        return _calibre_unavailable_response(settings, "book metadata", exc)
     if book is None:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
     metadata = book_metadata(book, settings, token)
@@ -467,7 +488,10 @@ def _download_response(settings: Settings, resource_path: str) -> Response:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
     library = CalibreLibrary(settings.calibre_library_path)
-    book = library.get_book_by_id(book_id)
+    try:
+        book = library.get_book_by_id(book_id)
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        return _calibre_unavailable_response(settings, "download", exc)
     if book is None:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
@@ -514,7 +538,11 @@ def _cover_response(settings: Settings, resource_path: str) -> Response | None:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
     library = CalibreLibrary(settings.calibre_library_path)
-    for book in library.list_books():
+    try:
+        books = library.list_books()
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        return _calibre_unavailable_response(settings, "cover", exc)
+    for book in books:
         if _image_id_matches_book(image_id, book.uuid):
             if book.cover_path is not None and book.cover_path.is_file():
                 return Response(

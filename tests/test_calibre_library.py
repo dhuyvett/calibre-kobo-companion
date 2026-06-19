@@ -7,7 +7,11 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from calibre_fixture import create_calibre_fixture_library
-from calibre_kobo_companion.calibre import CalibreLibrary, UnsafeCalibrePath
+from calibre_kobo_companion.calibre import (
+    CalibreLibrary,
+    CalibreLibraryUnavailable,
+    UnsafeCalibrePath,
+)
 
 
 class CalibreLibraryTests(TestCase):
@@ -54,6 +58,13 @@ class CalibreLibraryTests(TestCase):
                     connection.execute("CREATE TABLE should_not_write (id INTEGER)")
 
         self.assertEqual(count, 2)
+
+    def test_connect_reports_missing_metadata_database_as_unavailable(self) -> None:
+        with TemporaryDirectory() as directory:
+            library = CalibreLibrary(Path(directory) / "missing-library")
+
+            with self.assertRaisesRegex(CalibreLibraryUnavailable, "metadata database"):
+                library.connect()
 
     def test_resolve_library_path_rejects_parent_traversal(self) -> None:
         with TemporaryDirectory() as directory:

@@ -314,6 +314,41 @@ class ServerTests(TestCase):
             ),
         )
 
+    def test_calibre_library_unavailable_returns_service_unavailable(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = _settings(root, library_path=root / "missing-library")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with self.assertLogs("calibre_kobo_companion.server", level="WARNING") as logs:
+                responses = [
+                    handle_get(f"/kobo/{device_token.token}/v1/library/sync", settings),
+                    handle_get(
+                        (
+                            f"/kobo/{device_token.token}/v1/library/"
+                            "11111111-1111-4111-8111-111111111111/metadata"
+                        ),
+                        settings,
+                    ),
+                    handle_get(f"/kobo/{device_token.token}/download/1/epub", settings),
+                    handle_get(
+                        (
+                            f"/kobo/{device_token.token}/"
+                            "11111111-1111-4111-8111-111111111111/300/400/false/image.jpg"
+                        ),
+                        settings,
+                    ),
+                ]
+
+        self.assertEqual([response.status for response in responses], [503] * 4)
+        self.assertEqual(
+            [response.payload for response in responses],
+            [{"error": "calibre_library_unavailable"}] * 4,
+        )
+        self.assertEqual(len(logs.output), 4)
+        self.assertIn("Calibre library unavailable during library sync", logs.output[0])
+
     def test_library_sync_uses_sync_token_for_incremental_results(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory) / "library")
@@ -493,6 +528,27 @@ class ServerTests(TestCase):
         self.assertEqual(response_body, b"Epub Only fixture EPUB\n")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
+    def test_download_returns_not_found_for_stale_format_metadata(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            stale_epub_path = (
+                fixture.root
+                / fixture.books[1].relative_path
+                / "Epub Only - Grace Hopper.epub"
+            )
+            stale_epub_path.unlink()
+            settings = _settings(Path(directory), library_path=fixture.root)
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            response = handle_get(
+                f"/kobo/{device_token.token}/download/{fixture.books[1].id}/epub",
+                settings,
+            )
+
+        self.assertEqual(response.status, 404)
+        self.assertEqual(response.payload, {"error": "not_found"})
+
     def test_download_prefers_exact_requested_format(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory) / "library")
@@ -620,6 +676,26 @@ class ServerTests(TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.content_type, "image/jpeg")
         self.assertEqual(response_body, SMALL_JPEG)
+
+    def test_cover_endpoint_returns_not_found_for_stale_cover_metadata(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            stale_cover_path = fixture.root / fixture.books[0].relative_path / "cover.jpg"
+            stale_cover_path.unlink()
+            settings = _settings(Path(directory), library_path=fixture.root)
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            response = handle_get(
+                (
+                    f"/kobo/{device_token.token}/{fixture.books[0].uuid}"
+                    "/300/400/false/image.jpg"
+                ),
+                settings,
+            )
+
+        self.assertEqual(response.status, 404)
+        self.assertEqual(response.payload, {"error": "not_found"})
 
     def test_cover_endpoint_accepts_quality_and_cache_busting_suffix(self) -> None:
         with TemporaryDirectory() as directory:
