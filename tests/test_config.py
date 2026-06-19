@@ -23,6 +23,8 @@ class ConfigTests(TestCase):
             "LISTEN_PORT": "9090",
             "ENABLE_KEPUBIFY": "true",
             "KEPUBIFY_PATH": "/usr/local/bin/kepubify",
+            "TLS_CERT_PATH": "/tmp/tls/fullchain.pem",
+            "TLS_KEY_PATH": "/tmp/tls/privkey.pem",
         }
 
         with patch.dict(os.environ, env, clear=True):
@@ -35,3 +37,16 @@ class ConfigTests(TestCase):
         self.assertEqual(settings.listen_port, 9090)
         self.assertTrue(settings.enable_kepubify)
         self.assertEqual(settings.kepubify_path, Path("/usr/local/bin/kepubify"))
+        self.assertTrue(settings.tls_enabled)
+        self.assertEqual(settings.tls_cert_path, Path("/tmp/tls/fullchain.pem"))
+        self.assertEqual(settings.tls_key_path, Path("/tmp/tls/privkey.pem"))
+
+    def test_tls_cert_and_key_must_be_configured_together(self) -> None:
+        env = {
+            "CALIBRE_LIBRARY_PATH": "/tmp/library",
+            "TLS_CERT_PATH": "/tmp/tls/fullchain.pem",
+        }
+
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ConfigError, "TLS_CERT_PATH and TLS_KEY_PATH"):
+                load_settings()

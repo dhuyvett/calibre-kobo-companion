@@ -5,8 +5,8 @@ in progress: Kobo initialization, auth, library sync, and book metadata are
 implemented. Existing EPUB/KEPUB downloads and cover serving are also
 implemented, along with minimal compatibility stubs for common Kobo
 user/assets/analytics requests. Optional KEPUB conversion through `kepubify`
-is implemented. Full compatibility coverage, TLS, and packaging are not
-implemented yet.
+and built-in TLS with user-provided certificate files are implemented. Full
+compatibility coverage and packaging are not implemented yet.
 
 ## Requirements
 
@@ -46,9 +46,16 @@ library. If conversion is disabled or not configured, EPUB-only books are
 advertised and served as EPUB.
 
 For HTTPS, use an `https://` `PUBLIC_BASE_URL` and configure the server with
-certificate and key files once built-in TLS support is implemented. The
-certificate can come from any method trusted by the Kobo. If using `acme.sh`,
-keep those details in [acme-sh-certificates.md](acme-sh-certificates.md).
+certificate and key files:
+
+```sh
+TLS_CERT_PATH=/config/tls/fullchain.pem
+TLS_KEY_PATH=/config/tls/privkey.pem
+```
+
+The certificate can come from any method trusted by the Kobo. If using
+`acme.sh`, keep those details in
+[acme-sh-certificates.md](acme-sh-certificates.md).
 
 ## Initialize the Companion Database
 
@@ -89,6 +96,20 @@ COMPANION_DB_PATH=./data/companion.db \
 PUBLIC_BASE_URL=http://192.168.1.50:8080 \
 LISTEN_HOST=0.0.0.0 \
 LISTEN_PORT=8080 \
+PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
+```
+
+For HTTPS, add `TLS_CERT_PATH` and `TLS_KEY_PATH`, use an HTTPS
+`PUBLIC_BASE_URL`, and use the same HTTPS base URL in the Kobo config:
+
+```sh
+CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
+COMPANION_DB_PATH=./data/companion.db \
+PUBLIC_BASE_URL=https://kobo.example.com:8443 \
+LISTEN_HOST=0.0.0.0 \
+LISTEN_PORT=8443 \
+TLS_CERT_PATH=/config/tls/fullchain.pem \
+TLS_KEY_PATH=/config/tls/privkey.pem \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
 ```
 
@@ -174,6 +195,6 @@ unauthorized responses from this service.
 - If sync returns no books, confirm the Calibre library contains EPUB or KEPUB
   formats and that `CALIBRE_LIBRARY_PATH` points at the directory containing
   `metadata.db`.
-- If the Kobo uses HTTPS-only behavior on a particular firmware version, use
-  built-in TLS once implemented or put the service behind a trusted reverse
-  proxy, then set `PUBLIC_BASE_URL` plus `api_endpoint` to the HTTPS URL.
+- If the Kobo cannot connect over HTTPS, confirm the certificate hostname
+  matches `PUBLIC_BASE_URL`, both TLS files are readable by the service, and
+  the Kobo trusts the certificate chain.

@@ -47,10 +47,16 @@ class Settings:
     kepubify_path: Path | None = None
     kepub_cache_max_mb: int = DEFAULT_KEPUB_CACHE_MAX_MB
     kepub_conversion_timeout_seconds: int = DEFAULT_KEPUB_CONVERSION_TIMEOUT_SECONDS
+    tls_cert_path: Path | None = None
+    tls_key_path: Path | None = None
 
     @property
     def metadata_db_path(self) -> Path:
         return self.calibre_library_path / "metadata.db"
+
+    @property
+    def tls_enabled(self) -> bool:
+        return self.tls_cert_path is not None and self.tls_key_path is not None
 
 
 def load_settings() -> Settings:
@@ -62,6 +68,8 @@ def load_settings() -> Settings:
     companion_cache = os.environ.get("COMPANION_CACHE_PATH", "./data/cache")
     public_base_url = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080")
     kepubify_path = os.environ.get("KEPUBIFY_PATH")
+    tls_cert_path = os.environ.get("TLS_CERT_PATH")
+    tls_key_path = os.environ.get("TLS_KEY_PATH")
 
     settings = Settings(
         calibre_library_path=Path(library).expanduser(),
@@ -83,6 +91,8 @@ def load_settings() -> Settings:
             "KEPUB_CONVERSION_TIMEOUT_SECONDS",
             default=DEFAULT_KEPUB_CONVERSION_TIMEOUT_SECONDS,
         ),
+        tls_cert_path=Path(tls_cert_path).expanduser() if tls_cert_path else None,
+        tls_key_path=Path(tls_key_path).expanduser() if tls_key_path else None,
     )
     validate_settings(settings)
     return settings
@@ -97,3 +107,5 @@ def validate_settings(settings: Settings) -> None:
         raise ConfigError("KEPUB_CACHE_MAX_MB must not be negative")
     if settings.kepub_conversion_timeout_seconds < 1:
         raise ConfigError("KEPUB_CONVERSION_TIMEOUT_SECONDS must be greater than zero")
+    if (settings.tls_cert_path is None) != (settings.tls_key_path is None):
+        raise ConfigError("TLS_CERT_PATH and TLS_KEY_PATH must be configured together")

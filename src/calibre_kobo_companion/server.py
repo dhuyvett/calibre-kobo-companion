@@ -5,14 +5,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from pathlib import Path
+import secrets
 import shutil
+import ssl
 from socketserver import BaseServer
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from .calibre import CalibreBook, CalibreFormat, CalibreLibrary
-from .config import Settings
+from .config import ConfigError, Settings
 from .db import is_device_token_active
 from .kobo import (
     book_metadata,
@@ -23,6 +26,9 @@ from .kepub import KepubConversionError, convert_epub_to_kepub
 
 
 logger = logging.getLogger(__name__)
+KOBO_STORE_API_URL = "https://storeapi.kobo.com"
+KOBO_AUTHORIZE_URL = "https://authorize.kobo.com"
+KOBO_WEB_URL = "https://www.kobo.com"
 
 
 @dataclass(frozen=True)
@@ -56,7 +62,11 @@ def handle_get(
             if auth_error is not None:
                 return auth_error
             if resource_path == "/v1/initialization":
-                return Response(HTTPStatus.OK, payload=_initialization_payload(settings, token))
+                return Response(
+                    HTTPStatus.OK,
+                    payload=_initialization_payload(settings, token),
+                    headers={"x-kobo-apitoken": "e30="},
+                )
             if resource_path == "/v1/library/sync":
                 return _library_sync_response(settings, token, headers)
             metadata_prefix = "/v1/library/"
@@ -79,19 +89,31 @@ def handle_get(
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
 
-def handle_post(path: str, settings: Settings) -> Response:
-    return _handle_kobo_mutating_request(path, settings)
+def handle_post(
+    path: str,
+    settings: Settings,
+    payload: Mapping[str, Any] | None = None,
+) -> Response:
+    return _handle_kobo_mutating_request(path, settings, payload)
 
 
 def handle_delete(path: str, settings: Settings) -> Response:
     return _handle_kobo_mutating_request(path, settings)
 
 
-def handle_put(path: str, settings: Settings) -> Response:
-    return _handle_kobo_mutating_request(path, settings)
+def handle_put(
+    path: str,
+    settings: Settings,
+    payload: Mapping[str, Any] | None = None,
+) -> Response:
+    return _handle_kobo_mutating_request(path, settings, payload)
 
 
-def _handle_kobo_mutating_request(path: str, settings: Settings) -> Response:
+def _handle_kobo_mutating_request(
+    path: str,
+    settings: Settings,
+    payload: Mapping[str, Any] | None = None,
+) -> Response:
     route = _parse_kobo_route(path)
     if route is None:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
@@ -104,11 +126,7 @@ def _handle_kobo_mutating_request(path: str, settings: Settings) -> Response:
     if resource_path in {"/v1/auth/device", "/v1/auth/refresh"}:
         return Response(
             HTTPStatus.OK,
-            payload={
-                "AccessToken": f"dummy-{token}",
-                "RefreshToken": f"dummy-refresh-{token}",
-                "TokenType": "Bearer",
-            },
+            payload=_auth_payload(payload),
         )
 
     compatibility_response = _compatibility_response(resource_path)
@@ -149,14 +167,20 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
             if method == "GET":
                 response = handle_get(self.path, self.server.settings, self.headers)
             elif method == "POST":
-                self._discard_request_body()
-                response = handle_post(self.path, self.server.settings)
+                response = handle_post(
+                    self.path,
+                    self.server.settings,
+                    self._read_json_request_body(),
+                )
             elif method == "DELETE":
                 self._discard_request_body()
                 response = handle_delete(self.path, self.server.settings)
             elif method == "PUT":
-                self._discard_request_body()
-                response = handle_put(self.path, self.server.settings)
+                response = handle_put(
+                    self.path,
+                    self.server.settings,
+                    self._read_json_request_body(),
+                )
             else:
                 response = Response(
                     HTTPStatus.METHOD_NOT_ALLOWED,
@@ -196,9 +220,28 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
         if content_length:
             self.rfile.read(content_length)
 
+    def _read_json_request_body(self) -> Mapping[str, Any] | None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if not content_length:
+            return None
+        raw_body = self.rfile.read(content_length)
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if isinstance(payload, Mapping):
+            return payload
+        return None
+
 
 def create_server(settings: Settings) -> BaseServer:
-    return CompanionServer((settings.listen_host, settings.listen_port), settings)
+    server = CompanionServer((settings.listen_host, settings.listen_port), settings)
+    if settings.tls_enabled:
+        server.socket = _tls_context(settings).wrap_socket(
+            server.socket,
+            server_side=True,
+        )
+    return server
 
 
 def serve(settings: Settings) -> None:
@@ -207,11 +250,33 @@ def serve(settings: Settings) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     server = create_server(settings)
-    print(f"Serving on http://{settings.listen_host}:{settings.listen_port}")
+    scheme = "https" if settings.tls_enabled else "http"
+    print(f"Serving on {scheme}://{settings.listen_host}:{settings.listen_port}")
     try:
         server.serve_forever()
     finally:
         server.server_close()
+
+
+def _tls_context(settings: Settings) -> ssl.SSLContext:
+    if settings.tls_cert_path is None or settings.tls_key_path is None:
+        raise ConfigError("TLS_CERT_PATH and TLS_KEY_PATH must be configured together")
+    if not settings.tls_cert_path.is_file():
+        raise ConfigError(f"TLS_CERT_PATH is not a readable file: {settings.tls_cert_path}")
+    if not settings.tls_key_path.is_file():
+        raise ConfigError(f"TLS_KEY_PATH is not a readable file: {settings.tls_key_path}")
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        context.load_cert_chain(
+            certfile=settings.tls_cert_path,
+            keyfile=settings.tls_key_path,
+        )
+    except OSError as exc:
+        raise ConfigError(f"TLS certificate or key could not be read: {exc}") from exc
+    except ssl.SSLError as exc:
+        raise ConfigError(f"TLS certificate and key are invalid or mismatched: {exc}") from exc
+    return context
 
 
 def _parse_kobo_route(path: str) -> tuple[str, str] | None:
@@ -234,20 +299,30 @@ def _validate_kobo_token(
     return Response(HTTPStatus.UNAUTHORIZED, payload={"error": "unauthorized"})
 
 
+def _auth_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
+    user_key = ""
+    if payload is not None and isinstance(payload.get("UserKey"), str):
+        user_key = payload["UserKey"]
+    return {
+        "AccessToken": secrets.token_urlsafe(24),
+        "RefreshToken": secrets.token_urlsafe(24),
+        "TokenType": "Bearer",
+        "TrackingId": str(uuid4()),
+        "UserKey": user_key,
+    }
+
+
 def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
     base_url = f"{settings.public_base_url}/kobo/{token}"
-    return {
-        "Resources": {
-            "Account": f"{base_url}/v1/user/profile",
-            "AuthDevice": f"{base_url}/v1/auth/device",
-            "AuthRefresh": f"{base_url}/v1/auth/refresh",
+    resources = _native_kobo_resources()
+    resources.update(
+        {
             "BookMetadata": f"{base_url}/v1/library/{{RevisionId}}/metadata",
             "Image": f"{base_url}/{{ImageId}}/{{Width}}/{{Height}}/false/image.jpg",
             "LibrarySync": f"{base_url}/v1/library/sync",
-            "assets": f"{base_url}/v1/assets",
-            "device_auth": f"{base_url}/v1/auth/device",
-            "device_refresh": f"{base_url}/v1/auth/refresh",
-            "get_tests_request": f"{base_url}/v1/analytics/gettests",
+            "delete_entitlement": f"{base_url}/v1/library/{{Ids}}",
+            "delete_tag": f"{base_url}/v1/library/tags/{{TagId}}",
+            "delete_tag_items": f"{base_url}/v1/library/tags/{{TagId}}/items/delete",
             "image_host": base_url,
             "image_url_quality_template": (
                 f"{base_url}/{{ImageId}}/{{Width}}/{{Height}}/"
@@ -259,11 +334,86 @@ def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
             "library_metadata": f"{base_url}/v1/library/{{Ids}}/metadata",
             "library_sync": f"{base_url}/v1/library/sync",
             "reading_state": f"{base_url}/v1/library/{{Ids}}/state",
-            "user_loyalty_benefits": f"{base_url}/v1/user/loyalty/benefits",
-            "user_profile": f"{base_url}/v1/user/profile",
-            "user_recommendations": f"{base_url}/v1/user/recommendations",
-            "user_wishlist": f"{base_url}/v1/user/wishlist",
+            "rename_tag": f"{base_url}/v1/library/tags/{{TagId}}",
+            "tag_items": f"{base_url}/v1/library/tags/{{TagId}}/Items",
+            "tags": f"{base_url}/v1/library/tags",
         }
+    )
+    return {
+        "Resources": resources
+    }
+
+
+def _native_kobo_resources() -> dict[str, Any]:
+    return {
+        "Account": f"{KOBO_STORE_API_URL}/v1/user/profile",
+        "AuthDevice": f"{KOBO_STORE_API_URL}/v1/auth/device",
+        "AuthRefresh": f"{KOBO_STORE_API_URL}/v1/auth/refresh",
+        "account_page": f"{KOBO_WEB_URL}/account/settings",
+        "add_device": f"{KOBO_STORE_API_URL}/v1/user/add-device",
+        "add_entitlement": f"{KOBO_STORE_API_URL}/v1/library/{{RevisionIds}}",
+        "affiliaterequest": f"{KOBO_STORE_API_URL}/v1/affiliate",
+        "assets": f"{KOBO_STORE_API_URL}/v1/assets",
+        "browse_history": f"{KOBO_STORE_API_URL}/v1/user/browsehistory",
+        "categories": f"{KOBO_STORE_API_URL}/v1/categories",
+        "configuration_data": f"{KOBO_STORE_API_URL}/v1/configuration",
+        "deals": f"{KOBO_STORE_API_URL}/v1/deals",
+        "device_auth": f"{KOBO_STORE_API_URL}/v1/auth/device",
+        "device_refresh": f"{KOBO_STORE_API_URL}/v1/auth/refresh",
+        "dictionary_host": "https://ereaderfiles.kobo.com",
+        "discovery_host": "https://discovery.kobobooks.com",
+        "ereaderdevices": f"{KOBO_STORE_API_URL}/v2/products/EReaderDeviceFeeds",
+        "exchange_auth": f"{KOBO_STORE_API_URL}/v1/auth/exchange",
+        "featured_lists": f"{KOBO_STORE_API_URL}/v1/products/featured",
+        "funnel_metrics": f"{KOBO_STORE_API_URL}/v1/funnelmetrics",
+        "get_download_keys": f"{KOBO_STORE_API_URL}/v1/library/downloadkeys",
+        "get_download_link": f"{KOBO_STORE_API_URL}/v1/library/downloadlink",
+        "get_tests_request": f"{KOBO_STORE_API_URL}/v1/analytics/gettests",
+        "help_page": f"{KOBO_WEB_URL}/help",
+        "kobo_display_price": "True",
+        "kobo_nativeborrow_enabled": "True",
+        "kobo_onestorelibrary_enabled": "False",
+        "kobo_privacyCentre_url": f"{KOBO_WEB_URL}/privacy",
+        "kobo_redeem_enabled": "True",
+        "kobo_superpoints_enabled": "True",
+        "kobo_wishlist_enabled": "True",
+        "library_book": f"{KOBO_STORE_API_URL}/v1/user/library/books/{{LibraryItemId}}",
+        "library_items": f"{KOBO_STORE_API_URL}/v1/user/library",
+        "library_prices": f"{KOBO_STORE_API_URL}/v1/user/library/previews/prices",
+        "library_search": f"{KOBO_STORE_API_URL}/v1/library/search",
+        "oauth_host": "https://oauth.kobo.com",
+        "personalizedrecommendations": (
+            f"{KOBO_STORE_API_URL}/v2/users/personalizedrecommendations"
+        ),
+        "post_analytics_event": f"{KOBO_STORE_API_URL}/v1/analytics/event",
+        "product_prices": f"{KOBO_STORE_API_URL}/v1/products/{{ProductIds}}/prices",
+        "product_recommendations": (
+            f"{KOBO_STORE_API_URL}/v1/products/{{ProductId}}/recommendations"
+        ),
+        "product_reviews": f"{KOBO_STORE_API_URL}/v1/products/{{ProductIds}}/reviews",
+        "products": f"{KOBO_STORE_API_URL}/v1/products",
+        "productsv2": f"{KOBO_STORE_API_URL}/v2/products",
+        "quickbuy_checkout": f"{KOBO_STORE_API_URL}/v1/store/quickbuy/{{PurchaseId}}/checkout",
+        "quickbuy_create": f"{KOBO_STORE_API_URL}/v1/store/quickbuy/purchase",
+        "rakuten_token_exchange": f"{KOBO_STORE_API_URL}/v1/auth/rakuten_token_exchange",
+        "reading_services_host": "https://readingservices.kobo.com",
+        "registration_page": f"{KOBO_AUTHORIZE_URL}/signup?returnUrl=http://kobo.com/",
+        "sign_in_page": f"{KOBO_AUTHORIZE_URL}/signin?returnUrl=http://kobo.com/",
+        "social_authorization_host": "https://social.kobobooks.com:8443",
+        "social_host": "https://social.kobobooks.com",
+        "store_home": "www.kobo.com/{region}/{language}",
+        "store_host": "www.kobo.com",
+        "store_search": f"{KOBO_WEB_URL}/{{region}}/{{language}}/Search?Query={{query}}",
+        "taste_profile": f"{KOBO_STORE_API_URL}/v1/products/tasteprofile",
+        "use_one_store": "True",
+        "user_loyalty_benefits": f"{KOBO_STORE_API_URL}/v1/user/loyalty/benefits",
+        "user_platform": f"{KOBO_STORE_API_URL}/v1/user/platform",
+        "user_profile": f"{KOBO_STORE_API_URL}/v1/user/profile",
+        "user_ratings": f"{KOBO_STORE_API_URL}/v1/user/ratings",
+        "user_recommendations": f"{KOBO_STORE_API_URL}/v1/user/recommendations",
+        "user_reviews": f"{KOBO_STORE_API_URL}/v1/user/reviews",
+        "user_wishlist": f"{KOBO_STORE_API_URL}/v1/user/wishlist",
+        "userguide_host": "https://ereaderfiles.kobo.com",
     }
 
 

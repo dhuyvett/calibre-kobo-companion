@@ -14,8 +14,7 @@ certificate files to a directory that Calibre Kobo Companion can read:
 /config/tls/privkey.pem
 ```
 
-The planned built-in TLS support will use those files through configuration
-similar to:
+Built-in TLS uses those files through configuration like:
 
 ```sh
 PUBLIC_BASE_URL=https://kobo.example.com:8443
@@ -88,8 +87,7 @@ server, omit `--reloadcmd` and restart the process manually after renewal.
 
 ## Configure the Service
 
-Once built-in TLS support is implemented, start the service with the deployed
-certificate paths:
+Start the service with the deployed certificate paths:
 
 ```sh
 CALIBRE_LIBRARY_PATH=/path/to/calibre-library \

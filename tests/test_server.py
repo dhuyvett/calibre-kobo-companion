@@ -5,9 +5,10 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import Mock, patch
 
 from calibre_fixture import SMALL_JPEG, create_calibre_fixture_library
-from calibre_kobo_companion.config import Settings
+from calibre_kobo_companion.config import ConfigError, Settings
 from calibre_kobo_companion.db import (
     create_device_token,
     initialize_companion_db,
@@ -15,6 +16,8 @@ from calibre_kobo_companion.db import (
 )
 from calibre_kobo_companion.kobo import SyncToken, encode_sync_token
 from calibre_kobo_companion.server import (
+    _tls_context,
+    create_server,
     handle_delete,
     handle_get,
     handle_post,
@@ -45,6 +48,58 @@ class ServerTests(TestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(response.payload, {"error": "unauthorized"})
 
+    def test_create_server_wraps_socket_when_tls_is_enabled(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cert_path = root / "fullchain.pem"
+            key_path = root / "privkey.pem"
+            cert_path.write_text("certificate", encoding="utf-8")
+            key_path.write_text("key", encoding="utf-8")
+            settings = _settings(
+                root,
+                listen_host="127.0.0.1",
+                listen_port=0,
+                tls_cert_path=cert_path,
+                tls_key_path=key_path,
+            )
+            wrapped_socket = Mock()
+            context = Mock()
+            context.wrap_socket.return_value = wrapped_socket
+            fake_server = Mock()
+            fake_server.socket = Mock()
+
+            with patch("calibre_kobo_companion.server.CompanionServer") as server_class:
+                server_class.return_value = fake_server
+                with patch(
+                    "calibre_kobo_companion.server._tls_context",
+                    return_value=context,
+                ) as tls_context:
+                    server = create_server(settings)
+
+            try:
+                self.assertIs(server, fake_server)
+                self.assertIs(server.socket, wrapped_socket)
+                server_class.assert_called_once_with(("127.0.0.1", 0), settings)
+                tls_context.assert_called_once_with(settings)
+                context.wrap_socket.assert_called_once()
+                self.assertTrue(context.wrap_socket.call_args.kwargs["server_side"])
+            finally:
+                server.server_close()
+
+    def test_create_server_rejects_missing_tls_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = _settings(
+                root,
+                listen_host="127.0.0.1",
+                listen_port=0,
+                tls_cert_path=root / "missing-fullchain.pem",
+                tls_key_path=root / "missing-privkey.pem",
+            )
+
+            with self.assertRaisesRegex(ConfigError, "TLS_CERT_PATH"):
+                _tls_context(settings)
+
     def test_initialization_returns_resource_urls_for_active_token(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
@@ -57,6 +112,7 @@ class ServerTests(TestCase):
             )
 
         self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["x-kobo-apitoken"], "e30=")
         resources = response.payload["Resources"]
         self.assertEqual(
             resources["LibrarySync"],
@@ -64,7 +120,7 @@ class ServerTests(TestCase):
         )
         self.assertEqual(
             resources["AuthDevice"],
-            f"http://example.test/kobo/{device_token.token}/v1/auth/device",
+            "https://storeapi.kobo.com/v1/auth/device",
         )
         self.assertEqual(
             resources["library_sync"],
@@ -72,7 +128,11 @@ class ServerTests(TestCase):
         )
         self.assertEqual(
             resources["device_auth"],
-            f"http://example.test/kobo/{device_token.token}/v1/auth/device",
+            "https://storeapi.kobo.com/v1/auth/device",
+        )
+        self.assertEqual(
+            resources["user_profile"],
+            "https://storeapi.kobo.com/v1/user/profile",
         )
         self.assertEqual(
             resources["image_url_template"],
@@ -81,8 +141,12 @@ class ServerTests(TestCase):
                 "/{ImageId}/{Width}/{Height}/false/image.jpg"
             ),
         )
+        self.assertEqual(
+            resources["reading_state"],
+            f"http://example.test/kobo/{device_token.token}/v1/library/{{Ids}}/state",
+        )
 
-    def test_auth_device_and_refresh_return_dummy_tokens(self) -> None:
+    def test_auth_device_and_refresh_return_kobo_compatible_tokens(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
             initialize_companion_db(settings.companion_db_path)
@@ -91,6 +155,7 @@ class ServerTests(TestCase):
             device_response = handle_post(
                 f"/kobo/{device_token.token}/v1/auth/device",
                 settings,
+                {"UserKey": "device-user-key"},
             )
             refresh_response = handle_post(
                 f"/kobo/{device_token.token}/v1/auth/refresh",
@@ -100,9 +165,12 @@ class ServerTests(TestCase):
         self.assertEqual(device_response.status, 200)
         self.assertEqual(refresh_response.status, 200)
         self.assertEqual(device_response.payload["TokenType"], "Bearer")
-        self.assertEqual(
+        self.assertEqual(device_response.payload["UserKey"], "device-user-key")
+        self.assertIn("TrackingId", device_response.payload)
+        self.assertIn("RefreshToken", device_response.payload)
+        self.assertNotEqual(
+            device_response.payload["AccessToken"],
             refresh_response.payload["AccessToken"],
-            f"dummy-{device_token.token}",
         )
 
     def test_compatibility_endpoints_return_success(self) -> None:
@@ -613,18 +681,26 @@ def _settings(
     directory: Path,
     *,
     library_path: Path | None = None,
+    listen_host: str = "0.0.0.0",
+    listen_port: int = 8080,
     kobo_sync_page_size: int = 100,
     enable_kepubify: bool = False,
     kepubify_path: Path | None = None,
+    tls_cert_path: Path | None = None,
+    tls_key_path: Path | None = None,
 ) -> Settings:
     return Settings(
         calibre_library_path=library_path or directory / "library",
         companion_db_path=directory / "companion.db",
         companion_cache_path=directory / "cache",
         public_base_url="http://example.test",
+        listen_host=listen_host,
+        listen_port=listen_port,
         kobo_sync_page_size=kobo_sync_page_size,
         enable_kepubify=enable_kepubify,
         kepubify_path=kepubify_path,
+        tls_cert_path=tls_cert_path,
+        tls_key_path=tls_key_path,
     )
 
 
