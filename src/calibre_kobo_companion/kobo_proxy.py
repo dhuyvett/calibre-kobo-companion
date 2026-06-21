@@ -34,6 +34,7 @@ class KoboProxyResponse:
     status: int
     payload: Any
     headers: dict[str, str]
+    body: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -89,12 +90,15 @@ def proxy_kobo_request(
                 status=response.status,
                 payload=_decode_payload(body),
                 headers=dict(response.headers.items()),
+                body=body,
             )
     except HTTPError as exc:
+        body = exc.read()
         return KoboProxyResponse(
             status=exc.code,
-            payload=_decode_payload(exc.read()),
+            payload=_decode_payload(body),
             headers=dict(exc.headers.items()),
+            body=body,
         )
     except URLError as exc:
         raise KoboStoreUnavailable(str(exc)) from exc

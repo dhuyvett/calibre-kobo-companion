@@ -12,7 +12,7 @@ import ssl
 from socketserver import BaseServer
 from dataclasses import dataclass, field
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from .calibre import CalibreBook, CalibreFormat, CalibreLibrary, CalibreLibraryError
@@ -122,8 +122,15 @@ def handle_delete(
     path: str,
     settings: Settings,
     headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
 ) -> Response:
-    return _handle_kobo_mutating_request("DELETE", path, settings, headers=headers)
+    return _handle_kobo_mutating_request(
+        "DELETE",
+        path,
+        settings,
+        headers=headers,
+        body=body,
+    )
 
 
 def handle_put(
@@ -238,8 +245,13 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
                     body or None,
                 )
             elif method == "DELETE":
-                self._discard_request_body()
-                response = handle_delete(self.path, self.server.settings, self.headers)
+                body = self._read_request_body()
+                response = handle_delete(
+                    self.path,
+                    self.server.settings,
+                    self.headers,
+                    body or None,
+                )
             elif method == "PUT":
                 body = self._read_request_body()
                 response = handle_put(
@@ -282,11 +294,6 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(file, self.wfile)
         else:
             self.wfile.write(body or b"")
-
-    def _discard_request_body(self) -> None:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        if content_length:
-            self.rfile.read(content_length)
 
     def _read_request_body(self) -> bytes:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -915,7 +922,7 @@ def _download_response(settings: Settings, resource_path: str) -> Response:
                 file_path=conversion.path,
                 content_type=_ebook_content_type(requested_format),
                 headers={
-                    "Content-Disposition": f'attachment; filename="{file_name}"',
+                    "Content-Disposition": _content_disposition(file_name),
                     "X-Content-Type-Options": "nosniff",
                 },
             )
@@ -1217,6 +1224,14 @@ def _split_kobo_ids(value: str) -> list[str]:
 
 
 def _proxy_response(kobo_response: KoboProxyResponse) -> Response:
+    if kobo_response.body is not None:
+        content_type = _case_insensitive_header(kobo_response.headers, "content-type")
+        return Response(
+            _http_status(kobo_response.status),
+            body=kobo_response.body,
+            content_type=content_type or "application/octet-stream",
+            headers=_hybrid_passthrough_headers(kobo_response.headers),
+        )
     return Response(
         _http_status(kobo_response.status),
         payload=kobo_response.payload,
@@ -1330,10 +1345,23 @@ def _ebook_file_response(
         file_path=book_format.path,
         content_type=_ebook_content_type(response_format),
         headers={
-            "Content-Disposition": f'attachment; filename="{file_name}"',
+            "Content-Disposition": _content_disposition(file_name),
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _content_disposition(file_name: str) -> str:
+    fallback = "".join(
+        character
+        if 32 <= ord(character) < 127 and character not in {'"', "\\", "/", ";"}
+        else "_"
+        for character in file_name
+    ).strip(" ._")
+    if not fallback:
+        fallback = "download"
+    encoded = quote(file_name, safe="")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
 
 
 def _book_format(book: CalibreBook, format_name: str) -> CalibreFormat | None:

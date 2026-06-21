@@ -12,6 +12,7 @@ The project is designed for a simple home setup: point it at a Calibre library, 
 - Keep runtime dependencies and resource usage small enough for Raspberry Pi class hardware.
 - Serve existing EPUB and KEPUB files from the library.
 - Optionally convert EPUB files to Kobo KEPUB format at download time, without modifying the Calibre library.
+- Optionally run in hybrid mode, proxying Kobo's native API while injecting local Calibre books into sync.
 
 ## Non-Goals
 
@@ -76,4 +77,16 @@ CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli serve
 ```
 
-The initial service exposes `GET /health`, token management commands, Kobo bootstrap/auth endpoints, library sync, book metadata responses, existing EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, and minimal compatibility stubs for common Kobo user/assets/analytics requests. Full compatibility coverage and packaging are planned but not implemented yet.
+Useful configuration:
+
+```sh
+KOBO_SYNC_MODE=hybrid                       # proxy Kobo API traffic and merge local books
+ENABLE_KEPUBIFY=true                        # advertise EPUB-only books as KEPUB downloads
+KEPUBIFY_PATH=/usr/local/bin/kepubify       # path to kepubify binary
+LISTEN_HOST=0.0.0.0
+LISTEN_PORT=8443                            
+TLS_CERT_PATH=/config/tls/fullchain.pem     # cert and key path needed if using TLS
+TLS_KEY_PATH=/config/tls/privkey.pem
+```
+
+The service currently provides `GET /health`, token management commands, Kobo bootstrap/auth endpoints, local and hybrid library sync, book metadata, EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, and local-mode compatibility stubs for common Kobo requests. Packaging artifacts such as Docker and systemd examples are still planned.

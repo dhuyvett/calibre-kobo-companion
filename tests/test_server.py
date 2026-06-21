@@ -27,6 +27,7 @@ from calibre_kobo_companion.kobo_proxy import (
     KoboStoreUnavailable,
 )
 from calibre_kobo_companion.server import (
+    _content_disposition,
     _tls_context,
     create_server,
     handle_delete,
@@ -545,6 +546,32 @@ class ServerTests(TestCase):
         self.assertEqual(proxy.call_args.args[2]["Authorization"], "Bearer official-token")
         self.assertEqual(proxy.call_args.args[2]["X-New-Kobo-Header"], "new-value")
 
+    def test_hybrid_unknown_get_preserves_raw_proxy_body(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"raw": "not json"},
+                    headers={"Content-Type": "text/plain; charset=utf-8"},
+                    body=b"not json",
+                ),
+            ):
+                response = handle_get(
+                    f"/kobo/{device_token.token}/v1/new/native/text",
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"not json")
+        self.assertEqual(response.content_type, "text/plain; charset=utf-8")
+        self.assertIsNone(response.payload)
+
     def test_hybrid_unknown_post_is_proxied_to_kobo(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory), kobo_sync_mode="hybrid")
@@ -584,6 +611,31 @@ class ServerTests(TestCase):
         self.assertEqual(proxy.call_args.args[3]["Authorization"], "Bearer official-token")
         self.assertEqual(proxy.call_args.args[3]["Content-Type"], "application/json")
         self.assertEqual(proxy.call_args.kwargs["payload"], payload)
+        self.assertEqual(proxy.call_args.kwargs["body"], body)
+
+    def test_hybrid_unknown_delete_is_proxied_with_raw_body(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            body = b'{"Ids":["official-book"]}'
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_request",
+                return_value=KoboProxyResponse(status=204, payload={}, headers={}),
+            ) as proxy:
+                response = handle_delete(
+                    f"/kobo/{device_token.token}/v1/new/native/action?force=true",
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                    body,
+                )
+
+        self.assertEqual(response.status, 204)
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "DELETE")
+        self.assertEqual(proxy.call_args.args[1], "/v1/new/native/action")
+        self.assertEqual(proxy.call_args.args[2], "force=true")
         self.assertEqual(proxy.call_args.kwargs["body"], body)
 
     def test_hybrid_overdrive_borrow_is_proxied_to_kobo(self) -> None:
@@ -1266,6 +1318,14 @@ class ServerTests(TestCase):
         self.assertEqual(response.content_type, "application/epub+zip")
         self.assertEqual(response_body, b"Epub Only fixture EPUB\n")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+
+    def test_content_disposition_escapes_download_filename(self) -> None:
+        header = _content_disposition('Bad "Title"\r\nInjected.epub')
+
+        self.assertIn('filename="Bad _Title___Injected.epub"', header)
+        self.assertIn("filename*=UTF-8''Bad%20%22Title%22%0D%0AInjected.epub", header)
+        self.assertNotIn("\r", header)
+        self.assertNotIn("\n", header)
 
     def test_download_returns_not_found_for_stale_format_metadata(self) -> None:
         with TemporaryDirectory() as directory:

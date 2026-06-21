@@ -48,7 +48,6 @@ class Settings:
     kobo_proxy_timeout_seconds: int = DEFAULT_KOBO_PROXY_TIMEOUT_SECONDS
     hybrid_sync_require_local_library: bool = False
     log_level: str = "info"
-    allow_kobo_mutation_acks: bool = True
     enable_kepubify: bool = False
     kepubify_path: Path | None = None
     kepub_cache_max_mb: int = DEFAULT_KEPUB_CACHE_MAX_MB
@@ -99,10 +98,6 @@ def load_settings() -> Settings:
             default=False,
         ),
         log_level=os.environ.get("LOG_LEVEL", "info"),
-        allow_kobo_mutation_acks=_bool_from_env(
-            os.environ.get("ALLOW_KOBO_MUTATION_ACKS"),
-            default=True,
-        ),
         enable_kepubify=_bool_from_env(os.environ.get("ENABLE_KEPUBIFY"), default=False),
         kepubify_path=Path(kepubify_path).expanduser() if kepubify_path else None,
         kepub_cache_max_mb=_int_from_env("KEPUB_CACHE_MAX_MB", default=DEFAULT_KEPUB_CACHE_MAX_MB),

@@ -1,5 +1,6 @@
 runserver.sh
 kobo-api-proxy
+*.log
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

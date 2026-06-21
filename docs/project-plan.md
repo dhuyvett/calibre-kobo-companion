@@ -31,7 +31,7 @@ The reference implementations include many features this project should not incl
 - Optional hybrid mode that acts as an intercepting reverse proxy for Kobo's
   native API while injecting local Calibre library content.
 - Optional local companion SQLite database for service-owned state only.
-- Docker image and systemd-friendly binary/script deployment.
+- Planned Docker image and systemd-friendly deployment examples.
 - Raspberry Pi class runtime target.
 
 ### Out of Scope
@@ -48,14 +48,16 @@ The reference implementations include many features this project should not incl
 
 ## Architecture
 
-Use a small Python ASGI or WSGI service. Recommended stack:
+Use a small Python service built primarily on the standard library. Current
+runtime stack:
 
-- `FastAPI` or `Starlette` for low-overhead request routing.
+- `http.server.ThreadingHTTPServer` for request routing and streaming.
 - Python standard `sqlite3` for direct read-only Calibre queries.
-- `uvicorn` as the server process.
+- Python standard `ssl` for optional built-in TLS.
+- Python standard `urllib.request` for hybrid Kobo proxying.
 - `kepubify` as an optional external binary for request-time EPUB-to-KEPUB conversion.
-- `Pillow` only if thumbnail resizing is needed; otherwise serve original covers and let Kobo request sizing be mostly advisory.
-- Optional `pydantic-settings` or environment parsing; avoid a large config framework.
+- No image library dependency; serve original covers and let Kobo request sizing
+  be mostly advisory.
 
 Python is the pragmatic choice because the references are Python, Calibre's schema is SQLite, and Raspberry Pi packaging is straightforward. Do not import Calibre itself; it is too large for this service and would pull in unnecessary runtime cost.
 
@@ -310,7 +312,8 @@ Cache policy:
 - Cache converted output only under `COMPANION_CACHE_PATH`, never inside the Calibre library.
 - Key the cache by book UUID, source format, source file size, and source file mtime.
 - Use a per-book conversion lock so simultaneous downloads do not run duplicate conversions.
-- Make the cache optional and bounded by configuration. A no-cache mode should convert to a temporary file and delete it after streaming.
+- Make the cache bounded by configuration. A future no-cache mode could convert
+  to a temporary file and delete it after streaming.
 
 Implementation notes:
 
@@ -349,7 +352,6 @@ KOBO_STORE_API_URL=https://storeapi.kobo.com
 KOBO_PROXY_TIMEOUT_SECONDS=20
 HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY=false
 LOG_LEVEL=info
-ALLOW_KOBO_MUTATION_ACKS=true
 ENABLE_KEPUBIFY=true
 KEPUBIFY_PATH=/usr/local/bin/kepubify
 KEPUB_CACHE_MAX_MB=1024
@@ -447,7 +449,6 @@ Expected idle footprint should be a single small Python process with no worker q
 - Create Python package, CLI entry point, config loader, and HTTP server.
 - Add companion DB migrations for token storage.
 - Add health endpoint that does not touch the Calibre library.
-- Add Dockerfile and basic systemd example.
 
 ### Phase 2: Read-Only Calibre Access
 

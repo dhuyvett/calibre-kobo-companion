@@ -1,16 +1,14 @@
 # Running the Server and Connecting a Kobo
 
 This guide covers a local development or home-LAN setup. The service is still
-in progress: Kobo initialization, auth, library sync, and book metadata are
-implemented. Existing EPUB/KEPUB downloads and cover serving are also
-implemented, along with minimal compatibility stubs for common Kobo
-user/assets/analytics requests. Optional KEPUB conversion through `kepubify`
-and built-in TLS with user-provided certificate files are implemented. Full
-compatibility coverage and packaging are not implemented yet.
+in progress, but the core Kobo flows are implemented: initialization, auth,
+local and hybrid library sync, book metadata, EPUB/KEPUB downloads, cover
+serving, optional KEPUB conversion through `kepubify`, and built-in TLS with
+user-provided certificate files. Packaging artifacts are not implemented yet.
 
 ## Requirements
 
-- Python 3.
+- Python 3.11 or newer.
 - A Calibre library directory containing `metadata.db`.
 - The machine running this service must be reachable from the Kobo over the
   same network.
@@ -32,6 +30,29 @@ that would point the Kobo back at itself.
 
 `COMPANION_DB_PATH` is service-owned writable state. Keep it outside the
 Calibre library.
+
+The default sync mode is local-only:
+
+```sh
+KOBO_SYNC_MODE=local
+```
+
+Local mode syncs Calibre books and returns small compatibility responses for
+common Kobo account/store requests. It does not sync official Kobo Store or
+OverDrive/Libby content.
+
+Hybrid mode proxies Kobo's native API and merges local Calibre books into the
+official Kobo sync:
+
+```sh
+KOBO_SYNC_MODE=hybrid
+KOBO_STORE_API_URL=https://storeapi.kobo.com
+KOBO_PROXY_TIMEOUT_SECONDS=20
+```
+
+Use hybrid mode if you want Kobo Store or OverDrive/Libby loans to keep working
+on the same device. Hybrid mode forwards the device's Kobo session upstream;
+do not log or share bearer tokens, user keys, API tokens, or sync tokens.
 
 To advertise and serve KEPUB downloads for EPUB-only books, also configure:
 
@@ -159,8 +180,10 @@ With the current implementation, the Kobo should be able to:
 - Download converted KEPUB files for EPUB-only books when `kepubify` is
   enabled.
 - Request cover images from Calibre `cover.jpg` files.
-- Receive harmless empty responses for common user, assets, and analytics
-  requests made by Kobo firmware during sync.
+- In local mode, receive harmless empty responses for common user, assets, and
+  analytics requests made by Kobo firmware during sync.
+- In hybrid mode, continue syncing Kobo Store and OverDrive/Libby content while
+  also receiving local Calibre books.
 
 EPUB-only books are advertised and served as EPUB unless KEPUB conversion is
 enabled.

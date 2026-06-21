@@ -22,7 +22,8 @@ only when agent-specific navigation or workflow notes change.
   and path safety checks.
 - `src/calibre_kobo_companion/db.py`: companion database schema, initialization,
   and token storage. This database is service-owned and may be writable.
-- `src/calibre_kobo_companion/server.py`: current HTTP skeleton.
+- `src/calibre_kobo_companion/server.py`: HTTP routing, Kobo responses,
+  downloads, TLS setup, and hybrid proxy orchestration.
 - `src/calibre_kobo_companion/cli.py`: command-line entry point.
 - `tests/`: unit tests for configuration, companion database setup, and server
   behavior.
@@ -55,7 +56,7 @@ COMPANION_DB_PATH=./data/companion.db \
 PYTHONPATH=src python3 -m calibre_kobo_companion.cli init-db
 ```
 
-Run the current skeleton service:
+Run the service:
 
 ```sh
 CALIBRE_LIBRARY_PATH=/path/to/calibre-library \
