@@ -20,9 +20,16 @@ class KoboProxyTests(TestCase):
         forwarded = _forward_headers(
             {
                 "Authorization": "Bearer secret",
+                "If-None-Match": "etag",
+                "X-Kobo-AffiliateName": "Kobo",
                 "X-Kobo-UserKey": "user-key",
                 "X-Kobo-DeviceId": "device-id",
                 "X-Kobo-ApiToken": "api-token",
+                "X-Kobo-AppVersion": "4.38.23697",
+                "X-Kobo-DeviceModel": "Kobo Touch",
+                "X-Kobo-DeviceOS": "Linux",
+                "X-Kobo-DeviceOSVersion": "2.0",
+                "X-Kobo-PlatformId": "00000000-0000-0000-0000-000000000388",
                 "User-Agent": "Kobo",
                 "Accept-Language": "en-US",
                 "Cookie": "private",
@@ -34,11 +41,17 @@ class KoboProxyTests(TestCase):
             forwarded,
             {
                 "Authorization": "Bearer secret",
+                "If-None-Match": "etag",
+                "X-Kobo-AffiliateName": "Kobo",
                 "X-Kobo-UserKey": "user-key",
                 "X-Kobo-DeviceId": "device-id",
                 "X-Kobo-ApiToken": "api-token",
+                "X-Kobo-AppVersion": "4.38.23697",
+                "X-Kobo-DeviceModel": "Kobo Touch",
+                "X-Kobo-DeviceOS": "Linux",
+                "X-Kobo-DeviceOSVersion": "2.0",
+                "X-Kobo-PlatformId": "00000000-0000-0000-0000-000000000388",
                 "User-Agent": "Kobo",
                 "Accept-Language": "en-US",
             },
         )
-

@@ -84,6 +84,9 @@ def decode_hybrid_sync_token(value: str | None) -> HybridSyncToken:
     except (ValueError, TypeError, json.JSONDecodeError):
         return HybridSyncToken(kobo=value)
 
+    if payload.get("version") == SYNC_TOKEN_VERSION:
+        return HybridSyncToken(local=decode_sync_token(value))
+
     if (
         payload.get("version") != HYBRID_SYNC_TOKEN_VERSION
         or payload.get("mode") != "hybrid"

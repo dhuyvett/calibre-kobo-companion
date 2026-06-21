@@ -26,7 +26,12 @@ from .kobo import (
     decode_sync_token,
     encode_hybrid_sync_token,
 )
-from .kobo_proxy import KoboStoreUnavailable, proxy_kobo_get
+from .kobo_proxy import (
+    KoboProxyResponse,
+    KoboStoreUnavailable,
+    proxy_kobo_get,
+    proxy_kobo_request,
+)
 from .kepub import KepubConversionError, convert_epub_to_kepub
 
 
@@ -68,11 +73,7 @@ def handle_get(
             if auth_error is not None:
                 return auth_error
             if resource_path == "/v1/initialization":
-                return Response(
-                    HTTPStatus.OK,
-                    payload=_initialization_payload(settings, token),
-                    headers={"x-kobo-apitoken": "e30="},
-                )
+                return _initialization_response(settings, token, headers)
             if resource_path == "/v1/library/sync":
                 return _library_sync_response(settings, token, path, headers)
             metadata_prefix = "/v1/library/"
@@ -83,12 +84,21 @@ def handle_get(
                 book_uuid = resource_path[
                     len(metadata_prefix) : -len(metadata_suffix)
                 ]
-                return _book_metadata_response(settings, token, book_uuid)
+                return _book_metadata_response(settings, token, book_uuid, path, headers)
             if resource_path.startswith("/download/"):
                 return _download_response(settings, resource_path)
             cover_response = _cover_response(settings, resource_path)
             if cover_response is not None:
                 return cover_response
+            if settings.kobo_sync_mode == "hybrid":
+                hybrid_response = _hybrid_get_response(
+                    settings,
+                    resource_path,
+                    path,
+                    headers,
+                )
+                if hybrid_response is not None:
+                    return hybrid_response
             compatibility_response = _compatibility_response(resource_path)
             if compatibility_response is not None:
                 return compatibility_response
@@ -99,26 +109,34 @@ def handle_post(
     path: str,
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Response:
-    return _handle_kobo_mutating_request(path, settings, payload)
+    return _handle_kobo_mutating_request("POST", path, settings, payload, headers)
 
 
-def handle_delete(path: str, settings: Settings) -> Response:
-    return _handle_kobo_mutating_request(path, settings)
+def handle_delete(
+    path: str,
+    settings: Settings,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
+    return _handle_kobo_mutating_request("DELETE", path, settings, headers=headers)
 
 
 def handle_put(
     path: str,
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Response:
-    return _handle_kobo_mutating_request(path, settings, payload)
+    return _handle_kobo_mutating_request("PUT", path, settings, payload, headers)
 
 
 def _handle_kobo_mutating_request(
+    method: str,
     path: str,
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> Response:
     route = _parse_kobo_route(path)
     if route is None:
@@ -130,6 +148,14 @@ def _handle_kobo_mutating_request(
         return auth_error
 
     if resource_path in {"/v1/auth/device", "/v1/auth/refresh"}:
+        if settings.kobo_sync_mode == "hybrid":
+            return _hybrid_auth_response(
+                method,
+                settings,
+                resource_path,
+                headers,
+                payload,
+            )
         return Response(
             HTTPStatus.OK,
             payload=_auth_payload(payload),
@@ -137,6 +163,17 @@ def _handle_kobo_mutating_request(
 
     compatibility_response = _compatibility_response(resource_path)
     if compatibility_response is not None:
+        if settings.kobo_sync_mode == "hybrid":
+            hybrid_response = _hybrid_library_mutation_response(
+                method,
+                settings,
+                resource_path,
+                path,
+                headers,
+                payload,
+            )
+            if hybrid_response is not None:
+                return hybrid_response
         return compatibility_response
 
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
@@ -177,15 +214,17 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
                     self.path,
                     self.server.settings,
                     self._read_json_request_body(),
+                    self.headers,
                 )
             elif method == "DELETE":
                 self._discard_request_body()
-                response = handle_delete(self.path, self.server.settings)
+                response = handle_delete(self.path, self.server.settings, self.headers)
             elif method == "PUT":
                 response = handle_put(
                     self.path,
                     self.server.settings,
                     self._read_json_request_body(),
+                    self.headers,
                 )
             else:
                 response = Response(
@@ -335,10 +374,107 @@ def _auth_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
     }
 
 
+def _hybrid_auth_response(
+    method: str,
+    settings: Settings,
+    resource_path: str,
+    headers: Mapping[str, str] | None,
+    payload: Mapping[str, Any] | None,
+) -> Response:
+    try:
+        kobo_response = proxy_kobo_request(
+            method,
+            resource_path,
+            "",
+            _headers_without_dummy_api_token(headers),
+            settings,
+            payload=payload,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid auth: %s", exc)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+    return _proxy_response(kobo_response)
+
+
 def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
+    return _patched_initialization_payload(settings, token, _native_kobo_resources())
+
+
+def _initialization_response(
+    settings: Settings,
+    token: str,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    if settings.kobo_sync_mode != "hybrid":
+        return Response(
+            HTTPStatus.OK,
+            payload=_initialization_payload(settings, token),
+            headers={"x-kobo-apitoken": "e30="},
+        )
+
+    try:
+        kobo_response = proxy_kobo_get(
+            "/v1/initialization",
+            "",
+            _headers_without_dummy_api_token(headers),
+            settings,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid initialization: %s", exc)
+        return _hybrid_local_initialization_response(settings, token)
+
+    if kobo_response.status >= 400:
+        logger.warning(
+            "Kobo initialization returned %s during hybrid initialization; "
+            "falling back to local resource patching; request_auth=%s",
+            kobo_response.status,
+            _auth_header_presence(headers),
+        )
+        return _hybrid_local_initialization_response(settings, token)
+
+    upstream_payload = (
+        kobo_response.payload
+        if isinstance(kobo_response.payload, Mapping)
+        else {}
+    )
+    upstream_resources = upstream_payload.get("Resources", {})
+    resources = (
+        dict(upstream_resources)
+        if isinstance(upstream_resources, Mapping)
+        else {}
+    )
+    payload = dict(upstream_payload)
+    payload.update(_patched_initialization_payload(settings, token, resources))
+
+    response_headers = _hybrid_passthrough_headers(kobo_response.headers)
+    api_token = _case_insensitive_header(kobo_response.headers, "x-kobo-apitoken")
+    if api_token is not None:
+        response_headers["x-kobo-apitoken"] = api_token
+    return Response(
+        _http_status(kobo_response.status),
+        payload=payload,
+        headers=response_headers,
+    )
+
+
+def _hybrid_local_initialization_response(settings: Settings, token: str) -> Response:
+    return Response(
+        HTTPStatus.OK,
+        payload=_initialization_payload(settings, token),
+    )
+
+
+def _patched_initialization_payload(
+    settings: Settings,
+    token: str,
+    resources: Mapping[str, Any],
+) -> dict[str, Any]:
     base_url = f"{settings.public_base_url}/kobo/{token}"
-    resources = _native_kobo_resources()
-    resources.update(
+    patched_resources = dict(resources)
+    patched_resources.update(
         {
             "BookMetadata": f"{base_url}/v1/library/{{RevisionId}}/metadata",
             "Image": f"{base_url}/{{ImageId}}/{{Width}}/{{Height}}/false/image.jpg",
@@ -363,7 +499,7 @@ def _initialization_payload(settings: Settings, token: str) -> dict[str, Any]:
         }
     )
     return {
-        "Resources": resources
+        "Resources": patched_resources
     }
 
 
@@ -485,7 +621,7 @@ def _hybrid_library_sync_response(
         kobo_response = proxy_kobo_get(
             "/v1/library/sync",
             parsed_path.query,
-            headers,
+            _headers_without_dummy_api_token(headers),
             settings,
             sync_token=hybrid_token.kobo,
         )
@@ -496,7 +632,41 @@ def _hybrid_library_sync_response(
             payload={"error": "kobo_store_unavailable"},
         )
 
+    if (
+        kobo_response.status
+        in {HTTPStatus.BAD_REQUEST, HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}
+        and hybrid_token.kobo is not None
+    ):
+        logger.warning(
+            "Kobo Store rejected hybrid sync token with %s; retrying official sync "
+            "without it; request_auth=%s",
+            kobo_response.status,
+            _auth_header_presence(headers),
+        )
+        try:
+            kobo_response = proxy_kobo_get(
+                "/v1/library/sync",
+                parsed_path.query,
+                _headers_without_dummy_api_token(headers),
+                settings,
+            )
+        except KoboStoreUnavailable as exc:
+            logger.warning("Kobo Store unavailable during hybrid sync retry: %s", exc)
+            return Response(
+                HTTPStatus.BAD_GATEWAY,
+                payload={"error": "kobo_store_unavailable"},
+            )
+
     if kobo_response.status >= 400:
+        if kobo_response.status in {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}:
+            logger.warning(
+                "Kobo Store rejected hybrid sync with %s; returning local sync only; "
+                "official Kobo and OverDrive items will not sync until Kobo auth "
+                "is valid; request_auth=%s",
+                kobo_response.status,
+                _auth_header_presence(headers),
+            )
+            return _local_library_sync_response(settings, token, headers)
         return Response(
             _http_status(kobo_response.status),
             payload=kobo_response.payload,
@@ -562,6 +732,27 @@ def _hybrid_library_sync_response(
 def _book_metadata_response(
     settings: Settings,
     token: str,
+    book_ids_value: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    book_ids = _split_kobo_ids(book_ids_value)
+    if settings.kobo_sync_mode == "hybrid":
+        return _hybrid_book_metadata_response(
+            settings,
+            token,
+            book_ids,
+            request_path,
+            headers,
+        )
+    if len(book_ids) != 1:
+        return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+    return _local_book_metadata_response(settings, token, book_ids[0])
+
+
+def _local_book_metadata_response(
+    settings: Settings,
+    token: str,
     book_uuid: str,
 ) -> Response:
     library = CalibreLibrary(settings.calibre_library_path)
@@ -575,6 +766,80 @@ def _book_metadata_response(
     if not metadata:
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
     return Response(HTTPStatus.OK, payload=[metadata])
+
+
+def _hybrid_book_metadata_response(
+    settings: Settings,
+    token: str,
+    book_ids: list[str],
+    request_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    if not book_ids:
+        return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+
+    local_payload: list[dict[str, Any]] = []
+    official_ids: list[str] = []
+    try:
+        library = CalibreLibrary(settings.calibre_library_path)
+        for book_id in book_ids:
+            book = library.get_book_by_uuid(book_id)
+            if book is None:
+                official_ids.append(book_id)
+                continue
+            metadata = book_metadata(book, settings, token)
+            if metadata:
+                local_payload.append(metadata)
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        if settings.hybrid_sync_require_local_library:
+            return _calibre_unavailable_response(settings, "hybrid book metadata", exc)
+        logger.warning(
+            "Calibre library unavailable during hybrid book metadata at %s: %s",
+            settings.calibre_library_path,
+            exc,
+        )
+        official_ids = book_ids
+        local_payload = []
+
+    if not official_ids:
+        if not local_payload:
+            return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+        return Response(HTTPStatus.OK, payload=local_payload)
+
+    parsed_path = urlparse(request_path)
+    official_resource_path = f"/v1/library/{','.join(official_ids)}/metadata"
+    try:
+        kobo_response = proxy_kobo_get(
+            official_resource_path,
+            parsed_path.query,
+            _headers_without_dummy_api_token(headers),
+            settings,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid metadata: %s", exc)
+        if local_payload:
+            return Response(HTTPStatus.OK, payload=local_payload)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+
+    if kobo_response.status >= 400:
+        if local_payload and kobo_response.status == HTTPStatus.NOT_FOUND:
+            return Response(HTTPStatus.OK, payload=local_payload)
+        return _proxy_response(kobo_response)
+
+    if isinstance(kobo_response.payload, list):
+        payload = local_payload + kobo_response.payload
+    elif local_payload:
+        payload = local_payload
+    else:
+        payload = kobo_response.payload
+    return Response(
+        _http_status(kobo_response.status),
+        payload=payload,
+        headers=_hybrid_passthrough_headers(kobo_response.headers),
+    )
 
 
 def _download_response(settings: Settings, resource_path: str) -> Response:
@@ -658,6 +923,118 @@ def _cover_response(settings: Settings, resource_path: str) -> Response | None:
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
 
+def _hybrid_library_mutation_response(
+    method: str,
+    settings: Settings,
+    resource_path: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+    payload: Mapping[str, Any] | None,
+) -> Response | None:
+    routed_ids = _library_mutation_ids(resource_path)
+    if routed_ids is None:
+        return None
+    book_ids, suffix = routed_ids
+    if not book_ids:
+        return Response(HTTPStatus.OK, payload={})
+
+    try:
+        official_ids = _unknown_local_book_ids(settings, book_ids)
+    except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
+        if settings.hybrid_sync_require_local_library:
+            return _calibre_unavailable_response(settings, "hybrid library mutation", exc)
+        logger.warning(
+            "Calibre library unavailable during hybrid library mutation at %s: %s",
+            settings.calibre_library_path,
+            exc,
+        )
+        official_ids = book_ids
+
+    if not official_ids:
+        return Response(HTTPStatus.OK, payload={})
+
+    parsed_path = urlparse(request_path)
+    official_resource_path = f"/v1/library/{','.join(official_ids)}{suffix}"
+    try:
+        kobo_response = proxy_kobo_request(
+            method,
+            official_resource_path,
+            parsed_path.query,
+            _headers_without_dummy_api_token(headers),
+            settings,
+            payload=payload,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid library mutation: %s", exc)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+    return _proxy_response(kobo_response)
+
+
+def _hybrid_get_response(
+    settings: Settings,
+    resource_path: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response | None:
+    if not _should_proxy_hybrid_get(resource_path):
+        return None
+    parsed_path = urlparse(request_path)
+    try:
+        kobo_response = proxy_kobo_get(
+            resource_path,
+            parsed_path.query,
+            _headers_without_dummy_api_token(headers),
+            settings,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo Store unavailable during hybrid GET %s: %s", resource_path, exc)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+    if kobo_response.status >= 400:
+        logger.warning(
+            "Kobo Store returned %s for hybrid GET %s; request_auth=%s",
+            kobo_response.status,
+            resource_path,
+            _auth_header_presence(headers),
+        )
+    if (
+        kobo_response.status == HTTPStatus.FORBIDDEN
+        and resource_path in _HYBRID_AUTH_REFRESH_TRIGGER_PATHS
+    ):
+        return Response(
+            HTTPStatus.UNAUTHORIZED,
+            payload=kobo_response.payload,
+            headers=_hybrid_passthrough_headers(kobo_response.headers),
+        )
+    return _proxy_response(kobo_response)
+
+
+_HYBRID_AUTH_REFRESH_TRIGGER_PATHS = {
+    "/v1/user/profile",
+    "/v1/user/loyalty/benefits",
+    "/v1/deals",
+}
+
+
+def _should_proxy_hybrid_get(resource_path: str) -> bool:
+    if resource_path in _HYBRID_AUTH_REFRESH_TRIGGER_PATHS:
+        return True
+    if resource_path in {
+        "/v1/assets",
+        "/v1/user/recommendations",
+        "/v1/user/wishlist",
+    }:
+        return True
+    if resource_path.startswith("/v1/products/"):
+        return True
+    return False
+
+
 def _compatibility_response(resource_path: str) -> Response | None:
     if resource_path == "/v1/user/profile":
         return Response(
@@ -703,6 +1080,48 @@ def _is_read_only_library_mutation(resource_path: str) -> bool:
     return False
 
 
+def _library_mutation_ids(resource_path: str) -> tuple[list[str], str] | None:
+    if not resource_path.startswith("/v1/library/"):
+        return None
+    if resource_path.startswith("/v1/library/tags/"):
+        return None
+    if resource_path.endswith("/metadata"):
+        return None
+
+    remainder = resource_path[len("/v1/library/") :]
+    suffix = ""
+    ids_value = remainder
+    if "/" in remainder:
+        ids_value, suffix_part = remainder.split("/", 1)
+        suffix = f"/{suffix_part}"
+    return _split_kobo_ids(ids_value), suffix
+
+
+def _unknown_local_book_ids(settings: Settings, book_ids: list[str]) -> list[str]:
+    library = CalibreLibrary(settings.calibre_library_path)
+    unknown: list[str] = []
+    for book_id in book_ids:
+        if library.get_book_by_uuid(book_id) is None:
+            unknown.append(book_id)
+    return unknown
+
+
+def _split_kobo_ids(value: str) -> list[str]:
+    return [
+        book_id
+        for book_id in (part.strip() for part in value.split(","))
+        if book_id
+    ]
+
+
+def _proxy_response(kobo_response: KoboProxyResponse) -> Response:
+    return Response(
+        _http_status(kobo_response.status),
+        payload=kobo_response.payload,
+        headers=_hybrid_passthrough_headers(kobo_response.headers),
+    )
+
+
 def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:
     if headers is None:
         return None
@@ -710,6 +1129,38 @@ def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:
         if header_name.lower() == name:
             return value
     return None
+
+
+def _headers_without(
+    headers: Mapping[str, str] | None,
+    excluded_names: set[str],
+) -> dict[str, str]:
+    if headers is None:
+        return {}
+    excluded = {name.lower() for name in excluded_names}
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in excluded
+    }
+
+
+def _headers_without_dummy_api_token(
+    headers: Mapping[str, str] | None,
+) -> Mapping[str, str] | None:
+    if _header_value(headers, "x-kobo-apitoken") == "e30=":
+        return _headers_without(headers, {"x-kobo-apitoken"})
+    return headers
+
+
+def _auth_header_presence(headers: Mapping[str, str] | None) -> dict[str, bool]:
+    return {
+        "authorization": _header_value(headers, "authorization") is not None,
+        "x-kobo-apitoken": _header_value(headers, "x-kobo-apitoken") is not None,
+        "x-kobo-deviceid": _header_value(headers, "x-kobo-deviceid") is not None,
+        "x-kobo-userkey": _header_value(headers, "x-kobo-userkey") is not None,
+        "x-kobo-synctoken": _header_value(headers, "x-kobo-synctoken") is not None,
+    }
 
 
 def _case_insensitive_header(headers: Mapping[str, str], name: str) -> str | None:
@@ -721,7 +1172,14 @@ def _case_insensitive_header(headers: Mapping[str, str], name: str) -> str | Non
 
 def _hybrid_passthrough_headers(headers: Mapping[str, str]) -> dict[str, str]:
     passthrough = {}
-    for name in ("x-kobo-synctoken", "x-kobo-sync"):
+    for name in (
+        "etag",
+        "x-kobo-apitoken",
+        "x-kobo-recent-reads",
+        "x-kobo-sync",
+        "x-kobo-sync-mode",
+        "x-kobo-synctoken",
+    ):
         value = _case_insensitive_header(headers, name)
         if value is not None:
             passthrough[name] = value

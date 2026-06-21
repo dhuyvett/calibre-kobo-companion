@@ -13,9 +13,16 @@ FORWARDED_KOBO_HEADERS = {
     "accept",
     "accept-language",
     "authorization",
+    "if-none-match",
     "user-agent",
+    "x-kobo-affiliatename",
     "x-kobo-apitoken",
+    "x-kobo-appversion",
     "x-kobo-deviceid",
+    "x-kobo-devicemodel",
+    "x-kobo-deviceos",
+    "x-kobo-deviceosversion",
+    "x-kobo-platformid",
     "x-kobo-userkey",
 }
 
@@ -39,11 +46,35 @@ def proxy_kobo_get(
     *,
     sync_token: str | None = None,
 ) -> KoboProxyResponse:
+    return proxy_kobo_request(
+        "GET",
+        resource_path,
+        query,
+        headers,
+        settings,
+        sync_token=sync_token,
+    )
+
+
+def proxy_kobo_request(
+    method: str,
+    resource_path: str,
+    query: str,
+    headers: Mapping[str, str] | None,
+    settings: Settings,
+    *,
+    payload: Mapping[str, Any] | None = None,
+    sync_token: str | None = None,
+) -> KoboProxyResponse:
     url = _proxy_url(settings.kobo_store_api_url, resource_path, query)
     request_headers = _forward_headers(headers)
     if sync_token:
         request_headers["x-kobo-synctoken"] = sync_token
-    request = Request(url, headers=request_headers, method="GET")
+    body = None
+    if payload is not None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    request = Request(url, data=body, headers=request_headers, method=method)
 
     try:
         with urlopen(request, timeout=settings.kobo_proxy_timeout_seconds) as response:

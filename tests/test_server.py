@@ -153,6 +153,79 @@ class ServerTests(TestCase):
             f"http://example.test/kobo/{device_token.token}/v1/library/{{Ids}}/state",
         )
 
+    def test_hybrid_initialization_preserves_official_api_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={
+                        "Resources": {
+                            "LibrarySync": "https://storeapi.kobo.com/v1/library/sync",
+                            "user_profile": "https://storeapi.kobo.com/v1/user/profile",
+                        },
+                        "ReleaseNoteURL": "https://example.test/release",
+                    },
+                    headers={"x-kobo-apitoken": "official-api-token"},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    f"/kobo/{device_token.token}/v1/initialization",
+                    settings,
+                    {"User-Agent": "Kobo", "x-kobo-apitoken": "e30="},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["x-kobo-apitoken"], "official-api-token")
+        self.assertEqual(response.payload["ReleaseNoteURL"], "https://example.test/release")
+        resources = response.payload["Resources"]
+        self.assertEqual(
+            resources["LibrarySync"],
+            f"http://example.test/kobo/{device_token.token}/v1/library/sync",
+        )
+        self.assertEqual(
+            resources["BookMetadata"],
+            f"http://example.test/kobo/{device_token.token}/v1/library/{{RevisionId}}/metadata",
+        )
+        self.assertEqual(
+            resources["user_profile"],
+            "https://storeapi.kobo.com/v1/user/profile",
+        )
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "/v1/initialization")
+        self.assertEqual(proxy.call_args.args[2], {"User-Agent": "Kobo"})
+
+    def test_hybrid_initialization_falls_back_when_kobo_rejects_init(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=400,
+                    payload={"error": "bad_request"},
+                    headers={},
+                ),
+            ):
+                with self.assertLogs("calibre_kobo_companion.server", level="WARNING"):
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/initialization",
+                        settings,
+                    )
+
+        self.assertEqual(response.status, 200)
+        self.assertNotIn("x-kobo-apitoken", response.headers)
+        self.assertEqual(
+            response.payload["Resources"]["LibrarySync"],
+            f"http://example.test/kobo/{device_token.token}/v1/library/sync",
+        )
+
     def test_auth_device_and_refresh_return_kobo_compatible_tokens(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
@@ -180,6 +253,43 @@ class ServerTests(TestCase):
             refresh_response.payload["AccessToken"],
         )
 
+    def test_hybrid_auth_refresh_is_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            payload = {"RefreshToken": "device-refresh-token"}
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_request",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={
+                        "AccessToken": "official-access-token",
+                        "RefreshToken": "official-refresh-token",
+                        "TokenType": "Bearer",
+                    },
+                    headers={},
+                ),
+            ) as proxy:
+                response = handle_post(
+                    f"/kobo/{device_token.token}/v1/auth/refresh",
+                    settings,
+                    payload,
+                    {
+                        "Authorization": "Bearer stale-token",
+                        "x-kobo-apitoken": "e30=",
+                    },
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload["AccessToken"], "official-access-token")
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "POST")
+        self.assertEqual(proxy.call_args.args[1], "/v1/auth/refresh")
+        self.assertEqual(proxy.call_args.args[3], {"Authorization": "Bearer stale-token"})
+        self.assertEqual(proxy.call_args.kwargs["payload"], payload)
+
     def test_hybrid_sync_token_round_trips_local_and_kobo_state(self) -> None:
         encoded = encode_hybrid_sync_token(
             HybridSyncToken(
@@ -200,6 +310,17 @@ class ServerTests(TestCase):
         self.assertEqual(decoded.kobo, "raw-kobo-token")
         self.assertIsNone(decoded.local.since)
         self.assertEqual(decoded.local.offset, 0)
+
+    def test_hybrid_sync_token_migrates_legacy_local_sync_token(self) -> None:
+        legacy_token = encode_sync_token(
+            SyncToken(since="2024-02-02 12:00:00+00:00", offset=2)
+        )
+
+        decoded = decode_hybrid_sync_token(legacy_token)
+
+        self.assertIsNone(decoded.kobo)
+        self.assertEqual(decoded.local.since, "2024-02-02 12:00:00+00:00")
+        self.assertEqual(decoded.local.offset, 2)
 
     def test_compatibility_endpoints_return_success(self) -> None:
         with TemporaryDirectory() as directory:
@@ -251,6 +372,136 @@ class ServerTests(TestCase):
         self.assertEqual(user_reviews_response.status, 200)
         self.assertEqual(analytics_response.payload["Result"], "Success")
 
+    def test_hybrid_user_profile_is_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=401,
+                    payload={"error": "session_expired"},
+                    headers={},
+                ),
+            ) as proxy:
+                with self.assertLogs("calibre_kobo_companion.server", level="WARNING"):
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/user/profile",
+                        settings,
+                        {"Authorization": "Bearer stale-token"},
+                    )
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(response.payload, {"error": "session_expired"})
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "/v1/user/profile")
+
+    def test_hybrid_user_profile_forbidden_prompts_auth_refresh(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=403,
+                    payload={"error": "forbidden"},
+                    headers={},
+                ),
+            ):
+                with self.assertLogs("calibre_kobo_companion.server", level="WARNING"):
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/user/profile",
+                        settings,
+                        {
+                            "Authorization": "Bearer stale-token",
+                            "x-kobo-apitoken": "e30=",
+                        },
+                    )
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(response.payload, {"error": "forbidden"})
+
+    def test_hybrid_user_profile_preserves_kobo_api_token_header(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"UserDisplayName": "Kobo User"},
+                    headers={"x-kobo-apitoken": "official-api-token"},
+                ),
+            ):
+                response = handle_get(
+                    f"/kobo/{device_token.token}/v1/user/profile",
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {"UserDisplayName": "Kobo User"})
+        self.assertEqual(response.headers["x-kobo-apitoken"], "official-api-token")
+
+    def test_hybrid_native_get_endpoints_are_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"Items": []},
+                    headers={"etag": "wishlist-etag"},
+                ),
+            ) as proxy:
+                wishlist_response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/user/wishlist"
+                        "?PageSize=100&PageIndex=0"
+                    ),
+                    settings,
+                    {
+                        "Authorization": "Bearer official-token",
+                        "If-None-Match": "old-etag",
+                        "X-Kobo-AppVersion": "4.38.23697",
+                        "X-Kobo-PlatformId": "00000000-0000-0000-0000-000000000388",
+                    },
+                )
+                product_response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/products/"
+                        "1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread"
+                    ),
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+
+        self.assertEqual(wishlist_response.status, 200)
+        self.assertEqual(wishlist_response.headers["etag"], "wishlist-etag")
+        self.assertEqual(product_response.status, 200)
+        self.assertEqual(proxy.call_count, 2)
+        self.assertEqual(proxy.call_args_list[0].args[0], "/v1/user/wishlist")
+        self.assertEqual(proxy.call_args_list[0].args[1], "PageSize=100&PageIndex=0")
+        self.assertEqual(proxy.call_args_list[0].args[2]["If-None-Match"], "old-etag")
+        self.assertEqual(proxy.call_args_list[0].args[2]["X-Kobo-AppVersion"], "4.38.23697")
+        self.assertEqual(
+            proxy.call_args_list[0].args[2]["X-Kobo-PlatformId"],
+            "00000000-0000-0000-0000-000000000388",
+        )
+        self.assertEqual(
+            proxy.call_args_list[1].args[0],
+            "/v1/products/1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread",
+        )
+
     def test_read_only_kobo_mutations_are_acknowledged(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory))
@@ -285,6 +536,64 @@ class ServerTests(TestCase):
         self.assertEqual(tag_delete_response.payload, {})
         self.assertEqual(reading_state_response.status, 200)
         self.assertEqual(reading_state_response.payload, {})
+
+    def test_hybrid_local_reading_state_is_acknowledged_without_proxying(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch("calibre_kobo_companion.server.proxy_kobo_request") as proxy:
+                response = handle_put(
+                    (
+                        f"/kobo/{device_token.token}/v1/library/"
+                        f"{fixture.books[0].uuid}/state"
+                    ),
+                    settings,
+                    {"ReadingState": {"Status": "Finished"}},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {})
+        proxy.assert_not_called()
+
+    def test_hybrid_official_reading_state_is_proxied(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            payload = {"ReadingState": {"Status": "Finished"}}
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_request",
+                return_value=KoboProxyResponse(status=204, payload={}, headers={}),
+            ) as proxy:
+                response = handle_put(
+                    (
+                        f"/kobo/{device_token.token}/v1/library/"
+                        "official-book/state?merge=true"
+                    ),
+                    settings,
+                    payload,
+                    {"Authorization": "Bearer secret"},
+                )
+
+        self.assertEqual(response.status, 204)
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "PUT")
+        self.assertEqual(proxy.call_args.args[1], "/v1/library/official-book/state")
+        self.assertEqual(proxy.call_args.args[2], "merge=true")
+        self.assertEqual(proxy.call_args.kwargs["payload"], payload)
 
     def test_revoked_token_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
@@ -377,6 +686,7 @@ class ServerTests(TestCase):
                     settings,
                     {
                         "Authorization": "Bearer secret",
+                        "x-kobo-apitoken": "e30=",
                         "x-kobo-synctoken": "official-current-token",
                     },
                 )
@@ -397,9 +707,119 @@ class ServerTests(TestCase):
         proxy.assert_called_once()
         self.assertEqual(proxy.call_args.args[0], "/v1/library/sync")
         self.assertEqual(proxy.call_args.args[1], "Filter=ALL&DownloadUrlFilter=Generic")
+        self.assertEqual(proxy.call_args.args[2]["Authorization"], "Bearer secret")
+        self.assertNotIn("x-kobo-apitoken", proxy.call_args.args[2])
         self.assertEqual(proxy.call_args.kwargs["sync_token"], "official-current-token")
 
-    def test_hybrid_library_sync_passes_through_official_auth_failure(self) -> None:
+    def test_hybrid_library_sync_falls_back_to_local_when_kobo_forbidden(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=403,
+                    payload={"error": "forbidden"},
+                    headers={},
+                ),
+            ):
+                with self.assertLogs(
+                    "calibre_kobo_companion.server",
+                    level="WARNING",
+                ) as logs:
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/library/sync",
+                        settings,
+                        {"Authorization": "Bearer stale-token"},
+                    )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(response.payload), 2)
+        self.assertIn("'authorization': True", logs.output[0])
+
+    def test_hybrid_library_sync_does_not_forward_legacy_local_sync_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            legacy_token = encode_sync_token(
+                SyncToken(since="2024-02-02 12:00:00+00:00", offset=0)
+            )
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload=[],
+                    headers={"x-kobo-synctoken": "official-next-token"},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    f"/kobo/{device_token.token}/v1/library/sync",
+                    settings,
+                    {"x-kobo-synctoken": legacy_token},
+                )
+
+        self.assertEqual(response.status, 200)
+        proxy.assert_called_once()
+        self.assertIsNone(proxy.call_args.kwargs["sync_token"])
+
+    def test_hybrid_library_sync_retries_without_rejected_kobo_sync_token(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            hybrid_token = encode_hybrid_sync_token(
+                HybridSyncToken(kobo="stale-official-token")
+            )
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                side_effect=[
+                    KoboProxyResponse(
+                        status=400,
+                        payload={"error": "bad_sync_token"},
+                        headers={},
+                    ),
+                    KoboProxyResponse(
+                        status=200,
+                        payload=[],
+                        headers={"x-kobo-synctoken": "official-next-token"},
+                    ),
+                ],
+            ) as proxy:
+                with self.assertLogs("calibre_kobo_companion.server", level="WARNING"):
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/library/sync",
+                        settings,
+                        {"x-kobo-synctoken": hybrid_token},
+                    )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(proxy.call_count, 2)
+        self.assertEqual(proxy.call_args_list[0].kwargs["sync_token"], "stale-official-token")
+        self.assertIsNone(proxy.call_args_list[1].kwargs.get("sync_token"))
+
+    def test_hybrid_library_sync_falls_back_to_local_on_official_auth_failure(
+        self,
+    ) -> None:
         with TemporaryDirectory() as directory:
             fixture = create_calibre_fixture_library(Path(directory) / "library")
             settings = _settings(
@@ -418,14 +838,15 @@ class ServerTests(TestCase):
                     headers={"x-kobo-synctoken": "official-token"},
                 ),
             ):
-                response = handle_get(
-                    f"/kobo/{device_token.token}/v1/library/sync",
-                    settings,
-                )
+                with self.assertLogs("calibre_kobo_companion.server", level="WARNING"):
+                    response = handle_get(
+                        f"/kobo/{device_token.token}/v1/library/sync",
+                        settings,
+                    )
 
-        self.assertEqual(response.status, 401)
-        self.assertEqual(response.payload, {"error": "invalid_session"})
-        self.assertEqual(response.headers["x-kobo-synctoken"], "official-token")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(response.payload), 2)
+        self.assertIn("x-kobo-synctoken", response.headers)
 
     def test_hybrid_library_sync_returns_bad_gateway_when_kobo_store_unavailable(
         self,
@@ -647,6 +1068,64 @@ class ServerTests(TestCase):
 
         self.assertEqual(response.status, 404)
         self.assertEqual(response.payload, {"error": "not_found"})
+
+    def test_hybrid_book_metadata_serves_local_uuid_without_proxying(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch("calibre_kobo_companion.server.proxy_kobo_get") as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/library/"
+                        f"{fixture.books[1].uuid}/metadata"
+                    ),
+                    settings,
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload[0]["Id"], fixture.books[1].uuid)
+        proxy.assert_not_called()
+
+    def test_hybrid_book_metadata_proxies_unknown_official_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload=[{"Id": "official-book", "Title": "Official Book"}],
+                    headers={},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/library/"
+                        "official-book/metadata?revision=latest"
+                    ),
+                    settings,
+                    {"Authorization": "Bearer secret"},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, [{"Id": "official-book", "Title": "Official Book"}])
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "/v1/library/official-book/metadata")
+        self.assertEqual(proxy.call_args.args[1], "revision=latest")
 
     def test_download_streams_existing_epub_file(self) -> None:
         with TemporaryDirectory() as directory:
