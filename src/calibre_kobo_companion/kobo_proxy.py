@@ -9,21 +9,19 @@ from urllib.request import Request, urlopen
 from .config import Settings
 
 
-FORWARDED_KOBO_HEADERS = {
-    "accept",
-    "accept-language",
-    "authorization",
-    "if-none-match",
-    "user-agent",
-    "x-kobo-affiliatename",
-    "x-kobo-apitoken",
-    "x-kobo-appversion",
-    "x-kobo-deviceid",
-    "x-kobo-devicemodel",
-    "x-kobo-deviceos",
-    "x-kobo-deviceosversion",
-    "x-kobo-platformid",
-    "x-kobo-userkey",
+HOP_BY_HOP_REQUEST_HEADERS = {
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "expect",
+    "host",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 }
 
 
@@ -72,16 +70,17 @@ def proxy_kobo_request(
     *,
     payload: Mapping[str, Any] | None = None,
     sync_token: str | None = None,
+    body: bytes | None = None,
 ) -> KoboProxyResponse:
     url = _proxy_url(settings.kobo_store_api_url, resource_path, query)
     request_headers = _forward_headers(headers)
     if sync_token:
         request_headers["x-kobo-synctoken"] = sync_token
-    body = None
-    if payload is not None:
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    request_body = body
+    if request_body is None and payload is not None:
+        request_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request_headers.setdefault("Content-Type", "application/json")
-    request = Request(url, data=body, headers=request_headers, method=method)
+    request = Request(url, data=request_body, headers=request_headers, method=method)
 
     try:
         with urlopen(request, timeout=settings.kobo_proxy_timeout_seconds) as response:
@@ -137,8 +136,7 @@ def _forward_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
         return {}
     forwarded: dict[str, str] = {}
     for name, value in headers.items():
-        lower_name = name.lower()
-        if lower_name in FORWARDED_KOBO_HEADERS:
+        if name.lower() not in HOP_BY_HOP_REQUEST_HEADERS:
             forwarded[name] = value
     return forwarded
 

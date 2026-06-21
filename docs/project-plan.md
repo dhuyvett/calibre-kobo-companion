@@ -28,6 +28,8 @@ The reference implementations include many features this project should not incl
 - Kobo initialization resource responses that point the e-reader at this service.
 - Token-based device access suitable for editing `.kobo/Kobo/Kobo eReader.conf`.
 - Incremental Kobo library sync based on Calibre book timestamps and the Kobo sync-token header.
+- Optional hybrid mode that acts as an intercepting reverse proxy for Kobo's
+  native API while injecting local Calibre library content.
 - Optional local companion SQLite database for service-owned state only.
 - Docker image and systemd-friendly binary/script deployment.
 - Raspberry Pi class runtime target.
@@ -39,7 +41,9 @@ The reference implementations include many features this project should not incl
 - Uploading, deleting, editing, or converting books in the Calibre library.
 - Writing reading position, annotations, shelves, tags, archive status, or metadata back to Calibre.
 - Background scanning that continuously walks the library.
-- Proxying or mirroring the Kobo store unless a compatibility issue proves it is required.
+- Mirroring the Kobo store, caching Kobo account content, or replacing Kobo's
+  native account services. Hybrid mode may proxy Kobo API traffic only to
+  preserve device compatibility and add local Calibre content.
 - Multi-user administration. A simple static token model is enough for v1.
 
 ## Architecture
@@ -165,7 +169,8 @@ The token is a random server-generated secret. Users configure the Kobo device's
 
 ### Compatibility Stubs
 
-Return small success/empty responses for endpoints Kobo devices call but this service does not implement:
+In local mode, return small success/empty responses for endpoints Kobo devices
+call but this service does not implement:
 
 - user profile, loyalty, wishlist, analytics, assets
 - product discovery and recommendations
@@ -175,23 +180,41 @@ Return small success/empty responses for endpoints Kobo devices call but this se
 
 For mutation-like Kobo requests, return success only when harmless for the device. Log at debug level that the request was ignored because the service is read-only.
 
+In hybrid mode, do not add compatibility stubs for unidentified native Kobo
+traffic. Proxy unidentified Kobo API calls upstream by default, and intercept
+only the routes that this service owns or must alter.
+
 ## Hybrid Kobo Sync
 
 Hybrid sync should preserve official Kobo account/library behavior while adding
 Calibre books to the same device sync. This is required for Kobo Store books and
-OverDrive/Libby loans that are managed by Kobo's servers.
+OverDrive/Libby loans that are managed by Kobo's servers. Architect hybrid mode
+as an intercepting reverse proxy: proxy native Kobo API traffic by default, and
+handle only local Calibre-owned routes or protocol translation locally.
 
 Recommended behavior:
 
 - Keep `KOBO_SYNC_MODE=local` as the default. Add `KOBO_SYNC_MODE=hybrid` for
-  proxy-plus-merge behavior.
-- In hybrid mode, forward the device's official auth/session context to
-  Kobo's Store API for official library sync. Preserve headers such as
-  `Authorization`, `x-kobo-userkey`, `x-kobo-deviceid`, `x-kobo-apitoken`,
-  `x-kobo-synctoken`, `User-Agent`, and `Accept-Language`. Never log these
-  values.
-- Preserve query parameters such as `Filter`, `DownloadUrlFilter`, and
-  `PrioritizeRecentReads` when proxying `GET /v1/library/sync`.
+  intercepting reverse-proxy behavior.
+- In hybrid mode, forward all unidentified Kobo API methods, paths, query
+  strings, request bodies, and headers to Kobo's upstream services by default.
+  Preserve official auth/session context rather than maintaining an endpoint
+  allowlist.
+- Filter only hop-by-hop or locally invalid headers, such as `Host`,
+  `Connection`, `Transfer-Encoding`, stale `Content-Length` values after body
+  rewrites, and this service's dummy local auth markers. Never log secret
+  header values such as `Authorization`, `x-kobo-userkey`, `x-kobo-apitoken`,
+  or `x-kobo-synctoken`.
+- Pass through upstream response status, body, content type, and useful Kobo
+  response headers by default, again filtering hop-by-hop headers.
+- Preserve exact query parameters when proxying, including signed or
+  time-sensitive parameters for OverDrive/Libby flows such as
+  `GET /v1/library/borrow`.
+- Intercept `GET /v1/initialization` to rewrite resource URLs back to this
+  service while preserving the official API token/session details needed by the
+  device.
+- Intercept `GET /v1/library/sync` to proxy the official Kobo library sync
+  first, then merge local Calibre entitlements into the returned payload.
 - If the official Kobo sync returns an auth/session failure, pass that failure
   through to the device instead of hiding it.
 - If official sync succeeds, append locally generated Calibre entitlements to
@@ -201,9 +224,14 @@ Recommended behavior:
   official Kobo/OverDrive IDs.
 - Route metadata requests by ID: serve local Calibre UUIDs locally and proxy
   unknown IDs to Kobo in hybrid mode.
-- Continue to acknowledge read-only local mutation/state endpoints for local
-  Calibre IDs. Proxy or leave native official Kobo state endpoints for
-  non-local IDs.
+- Route cover/image requests by ID: serve local Calibre covers locally and
+  proxy unknown official Kobo image IDs to Kobo's image host.
+- Continue to acknowledge read-only local mutation/state endpoints only for
+  local Calibre IDs. Proxy native official Kobo state endpoints and other
+  non-local IDs upstream.
+- Emit structured logs that identify whether a request was intercepted locally
+  or proxied upstream, without logging bearer tokens, user keys, sync tokens, or
+  full device secrets.
 
 Hybrid sync-token handling:
 
@@ -381,6 +409,11 @@ Expected idle footprint should be a single small Python process with no worker q
 - Hybrid sync payload merge behavior and continuation header selection.
 - Hybrid metadata routing: local Calibre UUIDs are served locally, unknown IDs
   are proxied to Kobo.
+- Hybrid reverse-proxy default behavior: unidentified Kobo API calls preserve
+  method, path, query, body, and non-hop-by-hop headers.
+- Hybrid local intercept behavior: local sync, local metadata, local covers,
+  local downloads, initialization URL rewriting, and local state acks do not
+  leak local-only IDs or dummy auth upstream.
 
 ### Integration Tests
 
@@ -393,8 +426,10 @@ Expected idle footprint should be a single small Python process with no worker q
 - Repeated KEPUB download uses companion cache when enabled.
 - Cover endpoint returns image bytes.
 - Calibre library mounted/readable as read-only remains unchanged.
-- Hybrid sync proxies official Kobo sync, merges local entitlements, preserves
-  official auth failure responses, and does not log bearer/user-key headers.
+- Hybrid sync proxies unidentified native Kobo traffic, intercepts only local
+  Calibre-owned behavior, merges local entitlements into official sync,
+  preserves official auth failure responses, and does not log bearer/user-key
+  headers.
 
 ### Device Validation
 
@@ -455,18 +490,23 @@ Expected idle footprint should be a single small Python process with no worker q
 ### Phase 7: Hybrid Kobo Sync
 
 - Add `KOBO_SYNC_MODE=local|hybrid` and proxy timeout configuration.
-- Implement a small standard-library HTTP proxy helper for Kobo Store API
-  requests, forwarding only required auth/session headers and query params.
+- Implement a small standard-library intercepting reverse-proxy helper for Kobo
+  API requests, forwarding unidentified methods, paths, query strings, bodies,
+  and non-hop-by-hop headers by default.
+- Add explicit intercept rules for local Calibre-owned behavior: initialization
+  resource URL rewriting, local library sync merge, local metadata, local cover
+  images, local downloads, and local read-only state acknowledgements.
 - Implement composite hybrid sync tokens that preserve official Kobo sync state
   separately from local Calibre sync state.
 - Proxy official Kobo library sync first, then merge local Calibre entitlements
   into the payload.
 - Preserve continuation semantics when either official Kobo sync or local
   Calibre sync has more pages.
-- Route metadata/state requests by ID so local Calibre UUIDs stay local and
-  official Kobo/OverDrive IDs are proxied or left native.
-- Add tests for auth failures, proxy failures, token composition, payload
-  merging, continuation, and no secret header logging.
+- Route metadata/cover/state requests by ID so local Calibre UUIDs stay local
+  and official Kobo/OverDrive IDs are proxied upstream.
+- Add tests for default proxy behavior, intercept routing, auth failures, proxy
+  failures, token composition, payload merging, continuation, OverDrive borrow
+  forwarding, and no secret header logging.
 - Validate on a Kobo device with an active Kobo Store or OverDrive/Libby item.
 
 ### Phase 8: Packaging

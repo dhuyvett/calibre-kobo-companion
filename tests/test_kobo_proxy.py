@@ -16,22 +16,19 @@ class KoboProxyTests(TestCase):
             "https://store.example.test/v1/library/sync?Filter=ALL&DownloadUrlFilter=Generic",
         )
 
-    def test_forward_headers_allows_only_kobo_session_headers(self) -> None:
+    def test_forward_headers_filters_only_hop_by_hop_headers(self) -> None:
         forwarded = _forward_headers(
             {
                 "Authorization": "Bearer secret",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+                "Content-Length": "123",
+                "Expect": "100-continue",
                 "If-None-Match": "etag",
+                "Host": "local.example.test",
                 "X-Kobo-AffiliateName": "Kobo",
                 "X-Kobo-UserKey": "user-key",
-                "X-Kobo-DeviceId": "device-id",
-                "X-Kobo-ApiToken": "api-token",
-                "X-Kobo-AppVersion": "4.38.23697",
-                "X-Kobo-DeviceModel": "Kobo Touch",
-                "X-Kobo-DeviceOS": "Linux",
-                "X-Kobo-DeviceOSVersion": "2.0",
-                "X-Kobo-PlatformId": "00000000-0000-0000-0000-000000000388",
-                "User-Agent": "Kobo",
-                "Accept-Language": "en-US",
+                "X-New-Kobo-Header": "new-value",
                 "Cookie": "private",
                 "X-Forwarded-For": "192.0.2.1",
             }
@@ -44,14 +41,8 @@ class KoboProxyTests(TestCase):
                 "If-None-Match": "etag",
                 "X-Kobo-AffiliateName": "Kobo",
                 "X-Kobo-UserKey": "user-key",
-                "X-Kobo-DeviceId": "device-id",
-                "X-Kobo-ApiToken": "api-token",
-                "X-Kobo-AppVersion": "4.38.23697",
-                "X-Kobo-DeviceModel": "Kobo Touch",
-                "X-Kobo-DeviceOS": "Linux",
-                "X-Kobo-DeviceOSVersion": "2.0",
-                "X-Kobo-PlatformId": "00000000-0000-0000-0000-000000000388",
-                "User-Agent": "Kobo",
-                "Accept-Language": "en-US",
+                "X-New-Kobo-Header": "new-value",
+                "Cookie": "private",
+                "X-Forwarded-For": "192.0.2.1",
             },
         )

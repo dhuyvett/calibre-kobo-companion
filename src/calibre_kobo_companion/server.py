@@ -113,8 +113,9 @@ def handle_post(
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
     headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
 ) -> Response:
-    return _handle_kobo_mutating_request("POST", path, settings, payload, headers)
+    return _handle_kobo_mutating_request("POST", path, settings, payload, headers, body)
 
 
 def handle_delete(
@@ -130,8 +131,9 @@ def handle_put(
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
     headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
 ) -> Response:
-    return _handle_kobo_mutating_request("PUT", path, settings, payload, headers)
+    return _handle_kobo_mutating_request("PUT", path, settings, payload, headers, body)
 
 
 def _handle_kobo_mutating_request(
@@ -140,6 +142,7 @@ def _handle_kobo_mutating_request(
     settings: Settings,
     payload: Mapping[str, Any] | None = None,
     headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
 ) -> Response:
     route = _parse_kobo_route(path)
     if route is None:
@@ -158,15 +161,15 @@ def _handle_kobo_mutating_request(
                 resource_path,
                 headers,
                 payload,
+                body,
             )
         return Response(
             HTTPStatus.OK,
             payload=_auth_payload(payload),
         )
 
-    compatibility_response = _compatibility_response(resource_path)
-    if compatibility_response is not None:
-        if settings.kobo_sync_mode == "hybrid":
+    if settings.kobo_sync_mode == "hybrid":
+        if _is_read_only_library_mutation(resource_path):
             hybrid_response = _hybrid_library_mutation_response(
                 method,
                 settings,
@@ -174,9 +177,22 @@ def _handle_kobo_mutating_request(
                 path,
                 headers,
                 payload,
+                body,
             )
             if hybrid_response is not None:
                 return hybrid_response
+        return _hybrid_mutating_proxy_response(
+            method,
+            settings,
+            resource_path,
+            path,
+            headers,
+            payload,
+            body,
+        )
+
+    compatibility_response = _compatibility_response(resource_path)
+    if compatibility_response is not None:
         return compatibility_response
 
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
@@ -213,21 +229,25 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
             if method == "GET":
                 response = handle_get(self.path, self.server.settings, self.headers)
             elif method == "POST":
+                body = self._read_request_body()
                 response = handle_post(
                     self.path,
                     self.server.settings,
-                    self._read_json_request_body(),
+                    _json_payload_from_body(body),
                     self.headers,
+                    body or None,
                 )
             elif method == "DELETE":
                 self._discard_request_body()
                 response = handle_delete(self.path, self.server.settings, self.headers)
             elif method == "PUT":
+                body = self._read_request_body()
                 response = handle_put(
                     self.path,
                     self.server.settings,
-                    self._read_json_request_body(),
+                    _json_payload_from_body(body),
                     self.headers,
+                    body or None,
                 )
             else:
                 response = Response(
@@ -268,18 +288,11 @@ class CompanionRequestHandler(BaseHTTPRequestHandler):
         if content_length:
             self.rfile.read(content_length)
 
-    def _read_json_request_body(self) -> Mapping[str, Any] | None:
+    def _read_request_body(self) -> bytes:
         content_length = int(self.headers.get("Content-Length", "0"))
         if not content_length:
-            return None
-        raw_body = self.rfile.read(content_length)
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if isinstance(payload, Mapping):
-            return payload
-        return None
+            return b""
+        return self.rfile.read(content_length)
 
 
 def create_server(settings: Settings) -> BaseServer:
@@ -377,12 +390,25 @@ def _auth_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
     }
 
 
+def _json_payload_from_body(body: bytes) -> Mapping[str, Any] | None:
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(payload, Mapping):
+        return payload
+    return None
+
+
 def _hybrid_auth_response(
     method: str,
     settings: Settings,
     resource_path: str,
     headers: Mapping[str, str] | None,
     payload: Mapping[str, Any] | None,
+    body: bytes | None = None,
 ) -> Response:
     try:
         kobo_response = proxy_kobo_request(
@@ -392,6 +418,7 @@ def _hybrid_auth_response(
             _headers_without_dummy_api_token(headers),
             settings,
             payload=payload,
+            body=body,
         )
     except KoboStoreUnavailable as exc:
         logger.warning("Kobo Store unavailable during hybrid auth: %s", exc)
@@ -977,6 +1004,7 @@ def _hybrid_library_mutation_response(
     request_path: str,
     headers: Mapping[str, str] | None,
     payload: Mapping[str, Any] | None,
+    body: bytes | None = None,
 ) -> Response | None:
     routed_ids = _library_mutation_ids(resource_path)
     if routed_ids is None:
@@ -1010,6 +1038,7 @@ def _hybrid_library_mutation_response(
             _headers_without_dummy_api_token(headers),
             settings,
             payload=payload,
+            body=body,
         )
     except KoboStoreUnavailable as exc:
         logger.warning("Kobo Store unavailable during hybrid library mutation: %s", exc)
@@ -1026,8 +1055,6 @@ def _hybrid_get_response(
     request_path: str,
     headers: Mapping[str, str] | None,
 ) -> Response | None:
-    if not _should_proxy_hybrid_get(resource_path):
-        return None
     parsed_path = urlparse(request_path)
     try:
         kobo_response = proxy_kobo_get(
@@ -1061,26 +1088,53 @@ def _hybrid_get_response(
     return _proxy_response(kobo_response)
 
 
+def _hybrid_mutating_proxy_response(
+    method: str,
+    settings: Settings,
+    resource_path: str,
+    request_path: str,
+    headers: Mapping[str, str] | None,
+    payload: Mapping[str, Any] | None,
+    body: bytes | None = None,
+) -> Response:
+    parsed_path = urlparse(request_path)
+    try:
+        kobo_response = proxy_kobo_request(
+            method,
+            resource_path,
+            parsed_path.query,
+            _headers_without_dummy_api_token(headers),
+            settings,
+            payload=payload,
+            body=body,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning(
+            "Kobo Store unavailable during hybrid %s %s: %s",
+            method,
+            resource_path,
+            exc,
+        )
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_store_unavailable"},
+        )
+    if kobo_response.status >= 400:
+        logger.warning(
+            "Kobo Store returned %s for hybrid %s %s; request_auth=%s",
+            kobo_response.status,
+            method,
+            resource_path,
+            _auth_header_presence(headers),
+        )
+    return _proxy_response(kobo_response)
+
+
 _HYBRID_AUTH_REFRESH_TRIGGER_PATHS = {
     "/v1/user/profile",
     "/v1/user/loyalty/benefits",
     "/v1/deals",
 }
-
-
-def _should_proxy_hybrid_get(resource_path: str) -> bool:
-    if resource_path in _HYBRID_AUTH_REFRESH_TRIGGER_PATHS:
-        return True
-    if resource_path in {
-        "/v1/assets",
-        "/v1/library/borrow",
-        "/v1/user/recommendations",
-        "/v1/user/wishlist",
-    }:
-        return True
-    if resource_path.startswith("/v1/products/"):
-        return True
-    return False
 
 
 def _compatibility_response(resource_path: str) -> Response | None:
@@ -1230,16 +1284,23 @@ def _case_insensitive_header(headers: Mapping[str, str], name: str) -> str | Non
 
 def _hybrid_passthrough_headers(headers: Mapping[str, str]) -> dict[str, str]:
     passthrough = {}
-    for name in (
-        "etag",
-        "x-kobo-apitoken",
-        "x-kobo-recent-reads",
-        "x-kobo-sync",
-        "x-kobo-sync-mode",
-        "x-kobo-synctoken",
-    ):
-        value = _case_insensitive_header(headers, name)
-        if value is not None:
+    excluded = {
+        "connection",
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "date",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "server",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+    for name, value in headers.items():
+        if name.lower() not in excluded:
             passthrough[name] = value
     return passthrough
 

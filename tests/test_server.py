@@ -506,6 +506,86 @@ class ServerTests(TestCase):
             "/v1/products/1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread",
         )
 
+    def test_hybrid_unknown_get_is_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"Result": "Success"},
+                    headers={
+                        "Content-Encoding": "gzip",
+                        "X-New-Kobo-Response": "new-value",
+                    },
+                ),
+            ) as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/new/native/endpoint"
+                        "?IncludePreview=true"
+                    ),
+                    settings,
+                    {
+                        "Authorization": "Bearer official-token",
+                        "X-New-Kobo-Header": "new-value",
+                    },
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {"Result": "Success"})
+        self.assertNotIn("Content-Encoding", response.headers)
+        self.assertEqual(response.headers["X-New-Kobo-Response"], "new-value")
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "/v1/new/native/endpoint")
+        self.assertEqual(proxy.call_args.args[1], "IncludePreview=true")
+        self.assertEqual(proxy.call_args.args[2]["Authorization"], "Bearer official-token")
+        self.assertEqual(proxy.call_args.args[2]["X-New-Kobo-Header"], "new-value")
+
+    def test_hybrid_unknown_post_is_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+            payload = {"Event": "OpenedStore"}
+            body = b'{"Event" : "OpenedStore"}'
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_request",
+                return_value=KoboProxyResponse(
+                    status=202,
+                    payload={"Accepted": True},
+                    headers={},
+                ),
+            ) as proxy:
+                response = handle_post(
+                    (
+                        f"/kobo/{device_token.token}/v1/new/native/action"
+                        "?source=device"
+                    ),
+                    settings,
+                    payload,
+                    {
+                        "Authorization": "Bearer official-token",
+                        "Content-Type": "application/json",
+                    },
+                    body,
+                )
+
+        self.assertEqual(response.status, 202)
+        self.assertEqual(response.payload, {"Accepted": True})
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "POST")
+        self.assertEqual(proxy.call_args.args[1], "/v1/new/native/action")
+        self.assertEqual(proxy.call_args.args[2], "source=device")
+        self.assertEqual(proxy.call_args.args[3]["Authorization"], "Bearer official-token")
+        self.assertEqual(proxy.call_args.args[3]["Content-Type"], "application/json")
+        self.assertEqual(proxy.call_args.kwargs["payload"], payload)
+        self.assertEqual(proxy.call_args.kwargs["body"], body)
+
     def test_hybrid_overdrive_borrow_is_proxied_to_kobo(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory), kobo_sync_mode="hybrid")
