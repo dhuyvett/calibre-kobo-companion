@@ -60,11 +60,14 @@ To advertise and serve KEPUB downloads for EPUB-only books, also configure:
 ENABLE_KEPUBIFY=true
 KEPUBIFY_PATH=/usr/local/bin/kepubify
 COMPANION_CACHE_PATH=./data/cache
+KEPUB_CACHE_MAX_MB=1024
 ```
 
 Converted files are cached under `COMPANION_CACHE_PATH`, outside the Calibre
-library. If conversion is disabled or not configured, EPUB-only books are
-advertised and served as EPUB.
+library. After a conversion, the service prunes the oldest converted files until
+the KEPUB cache is under `KEPUB_CACHE_MAX_MB`; set it to `0` to disable pruning.
+If conversion is disabled or not configured, EPUB-only books are advertised and
+served as EPUB.
 
 For HTTPS, use an `https://` `PUBLIC_BASE_URL` and configure the server with
 certificate and key files:

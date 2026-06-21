@@ -124,7 +124,10 @@ If converted downloads are cached, store them outside the Calibre library under 
 {COMPANION_CACHE_PATH}/kepub/{book_uuid}/{source_mtime}-{source_size}.kepub.epub
 ```
 
-The cache is disposable. Deleting it must not affect the Calibre library or sync state.
+The cache is disposable. Deleting it must not affect the Calibre library or sync
+state. After a conversion creates a cached file, prune the oldest cached KEPUB
+files until the cache is under `KEPUB_CACHE_MAX_MB`. A value of `0` disables
+pruning.
 
 ## Kobo API Surface
 
@@ -312,8 +315,8 @@ Cache policy:
 - Cache converted output only under `COMPANION_CACHE_PATH`, never inside the Calibre library.
 - Key the cache by book UUID, source format, source file size, and source file mtime.
 - Use a per-book conversion lock so simultaneous downloads do not run duplicate conversions.
-- Make the cache bounded by configuration. A future no-cache mode could convert
-  to a temporary file and delete it after streaming.
+- Prune the oldest cached converted files after conversion so the cache stays
+  under `KEPUB_CACHE_MAX_MB`; a value of `0` disables pruning.
 
 Implementation notes:
 

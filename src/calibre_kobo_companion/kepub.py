@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,6 +14,9 @@ from .config import Settings
 
 class KepubConversionError(RuntimeError):
     """Raised when an EPUB cannot be converted to KEPUB."""
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ def convert_epub_to_kepub(
             shutil.move(str(converted_path), cache_temp_path)
             cache_temp_path.replace(cache_path)
 
+        prune_kepub_cache(settings, keep_path=cache_path)
         return KepubConversion(path=cache_path, created=True)
 
 
@@ -82,6 +87,52 @@ def kepub_cache_path(
     source_size = source_stat.st_size
     cache_name = f"{source_format.format.lower()}-{source_mtime}-{source_size}.kepub.epub"
     return settings.companion_cache_path / "kepub" / book.uuid / cache_name
+
+
+def prune_kepub_cache(settings: Settings, *, keep_path: Path | None = None) -> None:
+    max_bytes = settings.kepub_cache_max_mb * 1024 * 1024
+    cache_root = settings.companion_cache_path / "kepub"
+    if max_bytes <= 0 or not cache_root.exists():
+        return
+
+    keep_resolved = keep_path.resolve() if keep_path is not None else None
+    files = []
+    total_size = 0
+    for path in cache_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+            resolved = path.resolve()
+        except OSError:
+            continue
+        total_size += stat.st_size
+        files.append((stat.st_mtime_ns, stat.st_size, resolved, path))
+
+    if total_size <= max_bytes:
+        return
+
+    for _mtime, size, resolved, path in sorted(files):
+        if resolved == keep_resolved:
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("Could not prune KEPUB cache file %s: %s", path, exc)
+            continue
+        total_size -= size
+        _remove_empty_cache_parents(path.parent, cache_root)
+        if total_size <= max_bytes:
+            break
+
+
+def _remove_empty_cache_parents(path: Path, stop_at: Path) -> None:
+    while path != stop_at:
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
 
 
 def _conversion_lock(book_uuid: str) -> Lock:
