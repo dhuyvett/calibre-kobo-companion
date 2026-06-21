@@ -41,6 +41,8 @@ Download-time KEPUB conversion, when enabled, writes only to temporary storage o
 ## Project Plan
 
 The current implementation plan is in [docs/project-plan.md](docs/project-plan.md).
+For installation from GitHub, including a Raspberry Pi `systemd` service
+example, see [docs/installation.md](docs/installation.md).
 For local server startup and Kobo device configuration, see
 [docs/kobo-setup.md](docs/kobo-setup.md).
 For `acme.sh` certificate deployment notes, see
@@ -89,4 +91,6 @@ TLS_CERT_PATH=/config/tls/fullchain.pem     # cert and key path needed if using 
 TLS_KEY_PATH=/config/tls/privkey.pem
 ```
 
-The service currently provides `GET /health`, token management commands, Kobo bootstrap/auth endpoints, local and hybrid library sync, book metadata, EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, and local-mode compatibility stubs for common Kobo requests. Packaging artifacts such as Docker and systemd examples are still planned.
+`kepubify` is available from <https://pgaskin.net/kepubify/>.
+
+The service currently provides `GET /health`, token management commands, Kobo bootstrap/auth endpoints, local and hybrid library sync, book metadata, EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, and local-mode compatibility stubs for common Kobo requests.

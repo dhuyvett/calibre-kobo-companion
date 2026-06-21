@@ -31,7 +31,7 @@ The reference implementations include many features this project should not incl
 - Optional hybrid mode that acts as an intercepting reverse proxy for Kobo's
   native API while injecting local Calibre library content.
 - Optional local companion SQLite database for service-owned state only.
-- Planned Docker image and systemd-friendly deployment examples.
+- GitHub checkout installation docs and systemd-friendly deployment examples.
 - Raspberry Pi class runtime target.
 
 ### Out of Scope
@@ -320,7 +320,9 @@ Cache policy:
 
 Implementation notes:
 
-- Prefer the standalone `kepubify` binary over Calibre conversion tools because it is small and focused.
+- Prefer the standalone `kepubify` binary, available from
+  <https://pgaskin.net/kepubify/>, over Calibre conversion tools because it is
+  small and focused.
 - Run conversion with low priority where supported, for example `nice`, to avoid hurting Raspberry Pi responsiveness.
 - Use subprocess timeouts and size checks.
 - Do not advertise converted file sizes unless the converted cache file already exists; otherwise use the EPUB source size or omit size if Kobo tolerates it.
@@ -513,13 +515,12 @@ Expected idle footprint should be a single small Python process with no worker q
   forwarding, and no secret header logging.
 - Validate on a Kobo device with an active Kobo Store or OverDrive/Libby item.
 
-### Phase 8: Packaging
+### Phase 8: Installation and Deployment
 
-- Publish minimal Docker image.
-- Add sample `docker-compose.yml` with library mounted read-only.
-- Add sample TLS-capable deployment examples that mount certificate files read-only.
-- Add systemd unit example, including optional TLS certificate path configuration.
-- Add setup documentation for Kobo device configuration.
+- Add installation documentation for a GitHub checkout.
+- Add a Raspberry Pi `systemd` service example.
+- Document TLS-capable deployment with read-only certificate paths.
+- Keep setup documentation for Kobo device configuration current.
 - Add standalone certificate acquisition docs for supported examples, starting with `acme.sh`.
 
 ## Key Risks

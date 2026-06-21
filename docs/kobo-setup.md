@@ -4,7 +4,8 @@ This guide covers a local development or home-LAN setup. The service is still
 in progress, but the core Kobo flows are implemented: initialization, auth,
 local and hybrid library sync, book metadata, EPUB/KEPUB downloads, cover
 serving, optional KEPUB conversion through `kepubify`, and built-in TLS with
-user-provided certificate files. Packaging artifacts are not implemented yet.
+user-provided certificate files. For a persistent installation, see
+[installation.md](installation.md).
 
 ## Requirements
 
@@ -62,6 +63,8 @@ KEPUBIFY_PATH=/usr/local/bin/kepubify
 COMPANION_CACHE_PATH=./data/cache
 KEPUB_CACHE_MAX_MB=1024
 ```
+
+Install `kepubify` from <https://pgaskin.net/kepubify/>.
 
 Converted files are cached under `COMPANION_CACHE_PATH`, outside the Calibre
 library. After a conversion, the service prunes the oldest converted files until
