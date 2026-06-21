@@ -21,7 +21,11 @@ from calibre_kobo_companion.kobo import (
     encode_hybrid_sync_token,
     encode_sync_token,
 )
-from calibre_kobo_companion.kobo_proxy import KoboProxyResponse, KoboStoreUnavailable
+from calibre_kobo_companion.kobo_proxy import (
+    KoboBinaryProxyResponse,
+    KoboProxyResponse,
+    KoboStoreUnavailable,
+)
 from calibre_kobo_companion.server import (
     _tls_context,
     create_server,
@@ -501,6 +505,43 @@ class ServerTests(TestCase):
             proxy.call_args_list[1].args[0],
             "/v1/products/1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread",
         )
+
+    def test_hybrid_overdrive_borrow_is_proxied_to_kobo(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(Path(directory), kobo_sync_mode="hybrid")
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"EntitlementId": "overdrive-entitlement"},
+                    headers={},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/library/borrow"
+                        "?origin=kobo&KoboTitleId=od_9724722&ExpiryDate=1783880500"
+                    ),
+                    settings,
+                    {
+                        "Authorization": "Bearer official-token",
+                        "X-Kobo-AppVersion": "4.38.23697",
+                    },
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {"EntitlementId": "overdrive-entitlement"})
+        proxy.assert_called_once()
+        self.assertEqual(proxy.call_args.args[0], "/v1/library/borrow")
+        self.assertEqual(
+            proxy.call_args.args[1],
+            "origin=kobo&KoboTitleId=od_9724722&ExpiryDate=1783880500",
+        )
+        self.assertEqual(proxy.call_args.args[2]["Authorization"], "Bearer official-token")
+        self.assertEqual(proxy.call_args.args[2]["X-Kobo-AppVersion"], "4.38.23697")
 
     def test_read_only_kobo_mutations_are_acknowledged(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1294,6 +1335,71 @@ class ServerTests(TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.content_type, "image/jpeg")
         self.assertEqual(response_body, SMALL_JPEG)
+
+    def test_hybrid_cover_endpoint_serves_local_cover_without_proxying(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch("calibre_kobo_companion.server.proxy_kobo_binary_get") as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/{fixture.books[0].uuid}"
+                        "/300/400/false/image.jpg"
+                    ),
+                    settings,
+                )
+
+        self.assertEqual(response.status, 200)
+        proxy.assert_not_called()
+
+    def test_hybrid_cover_endpoint_proxies_unknown_official_image_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory) / "library")
+            settings = _settings(
+                Path(directory),
+                library_path=fixture.root,
+                kobo_sync_mode="hybrid",
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_binary_get",
+                return_value=KoboBinaryProxyResponse(
+                    status=200,
+                    body=b"official-cover",
+                    headers={"Content-Type": "image/jpeg"},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/official-image-id"
+                        "/355/530/80/false/image.jpg"
+                    ),
+                    settings,
+                    {
+                        "Authorization": "Bearer official-token",
+                        "X-Kobo-AppVersion": "4.38.23697",
+                    },
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"official-cover")
+        self.assertEqual(response.content_type, "image/jpeg")
+        proxy.assert_called_once()
+        self.assertEqual(
+            proxy.call_args.args[0],
+            "https://cdn.kobo.com/book-images/official-image-id/355/530/80/false/image.jpg",
+        )
+        self.assertEqual(proxy.call_args.args[1]["Authorization"], "Bearer official-token")
+        self.assertEqual(proxy.call_args.args[1]["X-Kobo-AppVersion"], "4.38.23697")
 
     def test_cover_endpoint_returns_not_found_for_stale_cover_metadata(self) -> None:
         with TemporaryDirectory() as directory:

@@ -38,6 +38,13 @@ class KoboProxyResponse:
     headers: dict[str, str]
 
 
+@dataclass(frozen=True)
+class KoboBinaryProxyResponse:
+    status: int
+    body: bytes
+    headers: dict[str, str]
+
+
 def proxy_kobo_get(
     resource_path: str,
     query: str,
@@ -88,6 +95,29 @@ def proxy_kobo_request(
         return KoboProxyResponse(
             status=exc.code,
             payload=_decode_payload(exc.read()),
+            headers=dict(exc.headers.items()),
+        )
+    except URLError as exc:
+        raise KoboStoreUnavailable(str(exc)) from exc
+
+
+def proxy_kobo_binary_get(
+    url: str,
+    headers: Mapping[str, str] | None,
+    settings: Settings,
+) -> KoboBinaryProxyResponse:
+    request = Request(url, headers=_forward_headers(headers), method="GET")
+    try:
+        with urlopen(request, timeout=settings.kobo_proxy_timeout_seconds) as response:
+            return KoboBinaryProxyResponse(
+                status=response.status,
+                body=response.read(),
+                headers=dict(response.headers.items()),
+            )
+    except HTTPError as exc:
+        return KoboBinaryProxyResponse(
+            status=exc.code,
+            body=exc.read(),
             headers=dict(exc.headers.items()),
         )
     except URLError as exc:

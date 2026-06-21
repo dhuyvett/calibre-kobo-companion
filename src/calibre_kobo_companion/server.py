@@ -27,8 +27,10 @@ from .kobo import (
     encode_hybrid_sync_token,
 )
 from .kobo_proxy import (
+    KoboBinaryProxyResponse,
     KoboProxyResponse,
     KoboStoreUnavailable,
+    proxy_kobo_binary_get,
     proxy_kobo_get,
     proxy_kobo_request,
 )
@@ -37,6 +39,7 @@ from .kepub import KepubConversionError, convert_epub_to_kepub
 
 logger = logging.getLogger(__name__)
 KOBO_STORE_API_URL = "https://storeapi.kobo.com"
+KOBO_IMAGEHOST_URL = "https://cdn.kobo.com/book-images"
 KOBO_AUTHORIZE_URL = "https://authorize.kobo.com"
 KOBO_WEB_URL = "https://www.kobo.com"
 _CALIBRE_UNAVAILABLE_EXCEPTIONS = (CalibreLibraryError, OSError, sqlite3.Error)
@@ -87,7 +90,7 @@ def handle_get(
                 return _book_metadata_response(settings, token, book_uuid, path, headers)
             if resource_path.startswith("/download/"):
                 return _download_response(settings, resource_path)
-            cover_response = _cover_response(settings, resource_path)
+            cover_response = _cover_response(settings, resource_path, headers)
             if cover_response is not None:
                 return cover_response
             if settings.kobo_sync_mode == "hybrid":
@@ -892,17 +895,24 @@ def _download_response(settings: Settings, resource_path: str) -> Response:
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
 
-def _cover_response(settings: Settings, resource_path: str) -> Response | None:
+def _cover_response(
+    settings: Settings,
+    resource_path: str,
+    headers: Mapping[str, str] | None,
+) -> Response | None:
     parts = resource_path.strip("/").split("/")
     if len(parts) == 5:
         image_id, width, height, false_literal, image_file = parts
+        quality = None
     elif len(parts) == 6:
-        image_id, width, height, _quality, false_literal, image_file = parts
+        image_id, width, height, quality, false_literal, image_file = parts
     else:
         return None
     if false_literal != "false" or image_file != "image.jpg":
         return None
-    if not width.isdigit() or not height.isdigit():
+    if not width.isdigit() or not height.isdigit() or (
+        quality is not None and not quality.isdigit()
+    ):
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
     library = CalibreLibrary(settings.calibre_library_path)
@@ -920,7 +930,44 @@ def _cover_response(settings: Settings, resource_path: str) -> Response | None:
                     headers={"X-Content-Type-Options": "nosniff"},
                 )
             return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+    if settings.kobo_sync_mode == "hybrid":
+        return _hybrid_cover_response(settings, image_id, width, height, quality, headers)
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+
+
+def _hybrid_cover_response(
+    settings: Settings,
+    image_id: str,
+    width: str,
+    height: str,
+    quality: str | None,
+    headers: Mapping[str, str] | None,
+) -> Response:
+    url = _kobo_image_url(image_id, width, height, quality)
+    try:
+        kobo_response = proxy_kobo_binary_get(
+            url,
+            _headers_without_dummy_api_token(headers),
+            settings,
+        )
+    except KoboStoreUnavailable as exc:
+        logger.warning("Kobo image host unavailable during hybrid cover lookup: %s", exc)
+        return Response(
+            HTTPStatus.BAD_GATEWAY,
+            payload={"error": "kobo_image_unavailable"},
+        )
+    return _binary_proxy_response(kobo_response)
+
+
+def _kobo_image_url(
+    image_id: str,
+    width: str,
+    height: str,
+    quality: str | None,
+) -> str:
+    if quality is None:
+        return f"{KOBO_IMAGEHOST_URL}/{image_id}/{width}/{height}/false/image.jpg"
+    return f"{KOBO_IMAGEHOST_URL}/{image_id}/{width}/{height}/{quality}/false/image.jpg"
 
 
 def _hybrid_library_mutation_response(
@@ -1026,6 +1073,7 @@ def _should_proxy_hybrid_get(resource_path: str) -> bool:
         return True
     if resource_path in {
         "/v1/assets",
+        "/v1/library/borrow",
         "/v1/user/recommendations",
         "/v1/user/wishlist",
     }:
@@ -1118,6 +1166,16 @@ def _proxy_response(kobo_response: KoboProxyResponse) -> Response:
     return Response(
         _http_status(kobo_response.status),
         payload=kobo_response.payload,
+        headers=_hybrid_passthrough_headers(kobo_response.headers),
+    )
+
+
+def _binary_proxy_response(kobo_response: KoboBinaryProxyResponse) -> Response:
+    content_type = _case_insensitive_header(kobo_response.headers, "content-type")
+    return Response(
+        _http_status(kobo_response.status),
+        body=kobo_response.body,
+        content_type=content_type or "application/octet-stream",
         headers=_hybrid_passthrough_headers(kobo_response.headers),
     )
 
