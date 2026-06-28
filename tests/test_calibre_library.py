@@ -59,6 +59,47 @@ class CalibreLibraryTests(TestCase):
 
         self.assertEqual(count, 2)
 
+    def test_targeted_book_lookup_reads_one_book(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory))
+            library = CalibreLibrary(fixture.root)
+
+            book_by_uuid = library.get_book_by_uuid(fixture.books[1].uuid)
+            book_by_id = library.get_book_by_id(fixture.books[1].id)
+
+        self.assertIsNotNone(book_by_uuid)
+        self.assertIsNotNone(book_by_id)
+        self.assertEqual(book_by_uuid.title, "Epub Only")
+        self.assertEqual(book_by_id.uuid, fixture.books[1].uuid)
+
+    def test_targeted_cover_lookup_returns_cover_path(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory))
+            library = CalibreLibrary(fixture.root)
+
+            cover_path = library.get_cover_by_uuid(fixture.books[0].uuid)
+
+        self.assertEqual(cover_path, fixture.root / fixture.books[0].relative_path / "cover.jpg")
+
+    def test_book_uuids_exist_returns_known_ids(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory))
+            library = CalibreLibrary(fixture.root)
+
+            existing = library.book_uuids_exist([fixture.books[0].uuid, "official-book"])
+
+        self.assertEqual(existing, {fixture.books[0].uuid})
+
+    def test_get_books_by_uuid_returns_known_books(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = create_calibre_fixture_library(Path(directory))
+            library = CalibreLibrary(fixture.root)
+
+            books = library.get_books_by_uuid([fixture.books[0].uuid, "official-book"])
+
+        self.assertEqual(set(books), {fixture.books[0].uuid})
+        self.assertEqual(books[fixture.books[0].uuid].title, "Existing Kepub")
+
     def test_connect_reports_missing_metadata_database_as_unavailable(self) -> None:
         with TemporaryDirectory() as directory:
             library = CalibreLibrary(Path(directory) / "missing-library")

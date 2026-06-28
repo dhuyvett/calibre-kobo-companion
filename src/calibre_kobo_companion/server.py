@@ -819,8 +819,9 @@ def _hybrid_book_metadata_response(
     official_ids: list[str] = []
     try:
         library = CalibreLibrary(settings.calibre_library_path)
+        local_books = library.get_books_by_uuid(book_ids)
         for book_id in book_ids:
-            book = library.get_book_by_uuid(book_id)
+            book = local_books.get(book_id)
             if book is None:
                 official_ids.append(book_id)
                 continue
@@ -949,21 +950,21 @@ def _cover_response(
     ):
         return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
 
+    image_book_uuid = _book_uuid_from_image_id(image_id)
     library = CalibreLibrary(settings.calibre_library_path)
     try:
-        books = library.list_books()
+        cover_path = library.get_cover_by_uuid(image_book_uuid)
     except _CALIBRE_UNAVAILABLE_EXCEPTIONS as exc:
         return _calibre_unavailable_response(settings, "cover", exc)
-    for book in books:
-        if _image_id_matches_book(image_id, book.uuid):
-            if book.cover_path is not None and book.cover_path.is_file():
-                return Response(
-                    HTTPStatus.OK,
-                    file_path=book.cover_path,
-                    content_type="image/jpeg",
-                    headers={"X-Content-Type-Options": "nosniff"},
-                )
-            return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
+    if cover_path is not None:
+        if cover_path.is_file():
+            return Response(
+                HTTPStatus.OK,
+                file_path=cover_path,
+                content_type="image/jpeg",
+                headers={"X-Content-Type-Options": "nosniff"},
+            )
+        return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
     if settings.kobo_sync_mode == "hybrid":
         return _hybrid_cover_response(settings, image_id, width, height, quality, headers)
     return Response(HTTPStatus.NOT_FOUND, payload={"error": "not_found"})
@@ -1208,11 +1209,8 @@ def _library_mutation_ids(resource_path: str) -> tuple[list[str], str] | None:
 
 def _unknown_local_book_ids(settings: Settings, book_ids: list[str]) -> list[str]:
     library = CalibreLibrary(settings.calibre_library_path)
-    unknown: list[str] = []
-    for book_id in book_ids:
-        if library.get_book_by_uuid(book_id) is None:
-            unknown.append(book_id)
-    return unknown
+    local_ids = library.book_uuids_exist(book_ids)
+    return [book_id for book_id in book_ids if book_id not in local_ids]
 
 
 def _split_kobo_ids(value: str) -> list[str]:
@@ -1371,5 +1369,5 @@ def _book_format(book: CalibreBook, format_name: str) -> CalibreFormat | None:
     return None
 
 
-def _image_id_matches_book(image_id: str, book_uuid: str) -> bool:
-    return image_id == book_uuid or image_id.startswith(f"{book_uuid}-")
+def _book_uuid_from_image_id(image_id: str) -> str:
+    return image_id[:36]

@@ -224,6 +224,10 @@ unauthorized responses from this service.
 - If sync returns no books, confirm the Calibre library contains EPUB or KEPUB
   formats and that `CALIBRE_LIBRARY_PATH` points at the directory containing
   `metadata.db`.
+- If sync is slow on Raspberry Pi hardware, prefer a local disk or reliable
+  wired network mount for the Calibre library. The service uses targeted
+  metadata, cover, and download lookups for per-book requests, but full library
+  sync still needs to read Calibre metadata for changed-book selection.
 - If logs show `calibre_library_unavailable`, confirm the Calibre library or
   network mount is available and that `metadata.db` is readable by the service.
 - If the Kobo cannot connect over HTTPS, confirm the certificate hostname

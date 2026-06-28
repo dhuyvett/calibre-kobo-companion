@@ -64,63 +64,54 @@ class CalibreLibrary:
 
     def list_books(self) -> tuple[CalibreBook, ...]:
         with closing(self.connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                  books.id,
-                  books.uuid,
-                  books.title,
-                  books.sort,
-                  books.timestamp,
-                  books.pubdate,
-                  books.series_index,
-                  books.path,
-                  books.has_cover,
-                  books.last_modified,
-                  (
-                    SELECT group_concat(authors.name, char(31))
-                    FROM books_authors_link
-                    JOIN authors ON authors.id = books_authors_link.author
-                    WHERE books_authors_link.book = books.id
-                    ORDER BY books_authors_link.id
-                  ) AS authors,
-                  comments.text AS description,
-                  publishers.name AS publisher,
-                  series.name AS series,
-                  languages.lang_code AS language,
-                  data.format,
-                  data.name AS data_name,
-                  data.uncompressed_size
-                FROM books
-                LEFT JOIN comments ON comments.book = books.id
-                LEFT JOIN books_publishers_link
-                  ON books_publishers_link.book = books.id
-                LEFT JOIN publishers
-                  ON publishers.id = books_publishers_link.publisher
-                LEFT JOIN books_series_link ON books_series_link.book = books.id
-                LEFT JOIN series ON series.id = books_series_link.series
-                LEFT JOIN books_languages_link
-                  ON books_languages_link.book = books.id
-                LEFT JOIN languages
-                  ON languages.id = books_languages_link.lang_code
-                LEFT JOIN data ON data.book = books.id
-                ORDER BY books.id, data.format
-                """
-            ).fetchall()
+            rows = connection.execute(f"{_BOOK_ROWS_SQL} ORDER BY books.id, data.format").fetchall()
 
         return self._books_from_rows(rows)
 
     def get_book_by_uuid(self, uuid: str) -> CalibreBook | None:
-        for book in self.list_books():
-            if book.uuid == uuid:
-                return book
-        return None
+        return self._get_single_book("books.uuid = ?", (uuid,))
+
+    def get_books_by_uuid(self, uuids: list[str]) -> dict[str, CalibreBook]:
+        if not uuids:
+            return {}
+        placeholders = ",".join("?" for _ in uuids)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                (
+                    f"{_BOOK_ROWS_SQL} WHERE books.uuid IN ({placeholders}) "
+                    "ORDER BY books.id, data.format"
+                ),
+                tuple(uuids),
+            ).fetchall()
+        return {book.uuid: book for book in self._books_from_rows(rows)}
 
     def get_book_by_id(self, book_id: int) -> CalibreBook | None:
-        for book in self.list_books():
-            if book.id == book_id:
-                return book
-        return None
+        return self._get_single_book("books.id = ?", (book_id,))
+
+    def get_cover_by_uuid(self, uuid: str) -> Path | None:
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT path, has_cover
+                FROM books
+                WHERE uuid = ?
+                """,
+                (uuid,),
+            ).fetchone()
+        if row is None or not row["has_cover"]:
+            return None
+        return self.resolve_library_path(Path(row["path"]) / "cover.jpg")
+
+    def book_uuids_exist(self, uuids: list[str]) -> set[str]:
+        if not uuids:
+            return set()
+        placeholders = ",".join("?" for _ in uuids)
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                f"SELECT uuid FROM books WHERE uuid IN ({placeholders})",
+                tuple(uuids),
+            ).fetchall()
+        return {row["uuid"] for row in rows}
 
     def resolve_library_path(self, relative_path: str | Path) -> Path:
         relative = Path(relative_path)
@@ -133,6 +124,21 @@ class CalibreLibrary:
         except ValueError as exc:
             raise UnsafeCalibrePath(f"path escapes library root: {relative}") from exc
         return resolved
+
+    def _get_single_book(
+        self,
+        where_clause: str,
+        parameters: tuple[object, ...],
+    ) -> CalibreBook | None:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                f"{_BOOK_ROWS_SQL} WHERE {where_clause} ORDER BY data.format",
+                parameters,
+            ).fetchall()
+        books = self._books_from_rows(rows)
+        if not books:
+            return None
+        return books[0]
 
     def _books_from_rows(self, rows: list[sqlite3.Row]) -> tuple[CalibreBook, ...]:
         books: list[CalibreBook] = []
@@ -203,3 +209,45 @@ def _split_authors(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(author for author in value.split(chr(31)) if author)
+
+
+_BOOK_ROWS_SQL = """
+SELECT
+  books.id,
+  books.uuid,
+  books.title,
+  books.sort,
+  books.timestamp,
+  books.pubdate,
+  books.series_index,
+  books.path,
+  books.has_cover,
+  books.last_modified,
+  (
+    SELECT group_concat(authors.name, char(31))
+    FROM books_authors_link
+    JOIN authors ON authors.id = books_authors_link.author
+    WHERE books_authors_link.book = books.id
+    ORDER BY books_authors_link.id
+  ) AS authors,
+  comments.text AS description,
+  publishers.name AS publisher,
+  series.name AS series,
+  languages.lang_code AS language,
+  data.format,
+  data.name AS data_name,
+  data.uncompressed_size
+FROM books
+LEFT JOIN comments ON comments.book = books.id
+LEFT JOIN books_publishers_link
+  ON books_publishers_link.book = books.id
+LEFT JOIN publishers
+  ON publishers.id = books_publishers_link.publisher
+LEFT JOIN books_series_link ON books_series_link.book = books.id
+LEFT JOIN series ON series.id = books_series_link.series
+LEFT JOIN books_languages_link
+  ON books_languages_link.book = books.id
+LEFT JOIN languages
+  ON languages.id = books_languages_link.lang_code
+LEFT JOIN data ON data.book = books.id
+"""
