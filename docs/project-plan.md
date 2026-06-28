@@ -205,6 +205,10 @@ Recommended behavior:
   strings, request bodies, and headers to Kobo's upstream services by default.
   Preserve official auth/session context rather than maintaining an endpoint
   allowlist.
+- Allow an explicit speed-focused setting to return local compatibility
+  responses for nonessential store chrome, recommendation, and analytics
+  endpoints observed during device sync. This must stay opt-in so default
+  hybrid mode continues to preserve official Kobo behavior.
 - Filter only hop-by-hop or locally invalid headers, such as `Host`,
   `Connection`, `Transfer-Encoding`, stale `Content-Length` values after body
   rewrites, and this service's dummy local auth markers. Never log secret

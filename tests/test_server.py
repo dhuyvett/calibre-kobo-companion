@@ -507,6 +507,79 @@ class ServerTests(TestCase):
             "/v1/products/1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread",
         )
 
+    def test_hybrid_nonessential_endpoints_can_be_stubbed(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(
+                Path(directory),
+                kobo_sync_mode="hybrid",
+                hybrid_stub_nonessential_kobo=True,
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch("calibre_kobo_companion.server.proxy_kobo_get") as get_proxy:
+                wishlist_response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/user/wishlist"
+                        "?PageSize=100&PageIndex=0"
+                    ),
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+                nextread_response = handle_get(
+                    (
+                        f"/kobo/{device_token.token}/v1/products/"
+                        "1f06bb2a-c8ab-4859-b48f-e4f24e8259d3/nextread"
+                    ),
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+
+            with patch("calibre_kobo_companion.server.proxy_kobo_request") as post_proxy:
+                analytics_response = handle_post(
+                    f"/kobo/{device_token.token}/v1/analytics/event",
+                    settings,
+                    {"Event": "SyncFinished"},
+                    {"Authorization": "Bearer official-token"},
+                )
+
+        self.assertEqual(wishlist_response.status, 200)
+        self.assertEqual(wishlist_response.payload, {})
+        self.assertEqual(nextread_response.status, 200)
+        self.assertEqual(nextread_response.payload, {})
+        self.assertEqual(analytics_response.status, 200)
+        self.assertEqual(analytics_response.payload, {})
+        get_proxy.assert_not_called()
+        post_proxy.assert_not_called()
+
+    def test_hybrid_fast_stubs_do_not_disable_unknown_proxying(self) -> None:
+        with TemporaryDirectory() as directory:
+            settings = _settings(
+                Path(directory),
+                kobo_sync_mode="hybrid",
+                hybrid_stub_nonessential_kobo=True,
+            )
+            initialize_companion_db(settings.companion_db_path)
+            device_token = create_device_token(settings.companion_db_path, "Clara")
+
+            with patch(
+                "calibre_kobo_companion.server.proxy_kobo_get",
+                return_value=KoboProxyResponse(
+                    status=200,
+                    payload={"Result": "Success"},
+                    headers={},
+                ),
+            ) as proxy:
+                response = handle_get(
+                    f"/kobo/{device_token.token}/v1/new/native/endpoint",
+                    settings,
+                    {"Authorization": "Bearer official-token"},
+                )
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.payload, {"Result": "Success"})
+        proxy.assert_called_once()
+
     def test_hybrid_unknown_get_is_proxied_to_kobo(self) -> None:
         with TemporaryDirectory() as directory:
             settings = _settings(Path(directory), kobo_sync_mode="hybrid")
@@ -1625,6 +1698,7 @@ def _settings(
     listen_port: int = 8080,
     kobo_sync_page_size: int = 100,
     kobo_sync_mode: str = "local",
+    hybrid_stub_nonessential_kobo: bool = False,
     enable_kepubify: bool = False,
     kepubify_path: Path | None = None,
     tls_cert_path: Path | None = None,
@@ -1639,6 +1713,7 @@ def _settings(
         listen_port=listen_port,
         kobo_sync_page_size=kobo_sync_page_size,
         kobo_sync_mode=kobo_sync_mode,
+        hybrid_stub_nonessential_kobo=hybrid_stub_nonessential_kobo,
         enable_kepubify=enable_kepubify,
         kepubify_path=kepubify_path,
         tls_cert_path=tls_cert_path,

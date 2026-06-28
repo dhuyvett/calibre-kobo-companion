@@ -47,6 +47,7 @@ class Settings:
     kobo_store_api_url: str = DEFAULT_KOBO_STORE_API_URL
     kobo_proxy_timeout_seconds: int = DEFAULT_KOBO_PROXY_TIMEOUT_SECONDS
     hybrid_sync_require_local_library: bool = False
+    hybrid_stub_nonessential_kobo: bool = False
     log_level: str = "info"
     enable_kepubify: bool = False
     kepubify_path: Path | None = None
@@ -95,6 +96,10 @@ def load_settings() -> Settings:
         ),
         hybrid_sync_require_local_library=_bool_from_env(
             os.environ.get("HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY"),
+            default=False,
+        ),
+        hybrid_stub_nonessential_kobo=_bool_from_env(
+            os.environ.get("HYBRID_STUB_NONESSENTIAL_KOBO"),
             default=False,
         ),
         log_level=os.environ.get("LOG_LEVEL", "info"),

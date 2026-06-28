@@ -25,6 +25,7 @@ class ConfigTests(TestCase):
             "KOBO_STORE_API_URL": "https://store.example.test/",
             "KOBO_PROXY_TIMEOUT_SECONDS": "12",
             "HYBRID_SYNC_REQUIRE_LOCAL_LIBRARY": "true",
+            "HYBRID_STUB_NONESSENTIAL_KOBO": "true",
             "ENABLE_KEPUBIFY": "true",
             "KEPUBIFY_PATH": "/usr/local/bin/kepubify",
             "TLS_CERT_PATH": "/tmp/tls/fullchain.pem",
@@ -43,6 +44,7 @@ class ConfigTests(TestCase):
         self.assertEqual(settings.kobo_store_api_url, "https://store.example.test")
         self.assertEqual(settings.kobo_proxy_timeout_seconds, 12)
         self.assertTrue(settings.hybrid_sync_require_local_library)
+        self.assertTrue(settings.hybrid_stub_nonessential_kobo)
         self.assertTrue(settings.enable_kepubify)
         self.assertEqual(settings.kepubify_path, Path("/usr/local/bin/kepubify"))
         self.assertTrue(settings.tls_enabled)

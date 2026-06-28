@@ -83,6 +83,7 @@ Useful configuration:
 
 ```sh
 KOBO_SYNC_MODE=hybrid                       # proxy Kobo API traffic and merge local books
+HYBRID_STUB_NONESSENTIAL_KOBO=true          # optional: speed sync by local-stubbing store chrome/analytics calls
 ENABLE_KEPUBIFY=true                        # advertise EPUB-only books as KEPUB downloads
 KEPUBIFY_PATH=/usr/local/bin/kepubify       # path to kepubify binary
 LISTEN_HOST=0.0.0.0
@@ -93,4 +94,4 @@ TLS_KEY_PATH=/config/tls/privkey.pem
 
 `kepubify` is available from <https://pgaskin.net/kepubify/>.
 
-The service currently provides `GET /health`, token management commands, Kobo bootstrap/auth endpoints, local and hybrid library sync, book metadata, EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, and local-mode compatibility stubs for common Kobo requests.
+The service currently provides `GET /health`, token management commands, Kobo bootstrap/auth endpoints, local and hybrid library sync, book metadata, EPUB/KEPUB downloads, optional EPUB-to-KEPUB conversion through `kepubify`, cover serving, built-in TLS with user-provided certificate files, local-mode compatibility stubs for common Kobo requests, and opt-in hybrid stubs for nonessential store chrome, recommendation, and analytics endpoints.

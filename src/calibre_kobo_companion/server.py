@@ -94,6 +94,13 @@ def handle_get(
             if cover_response is not None:
                 return cover_response
             if settings.kobo_sync_mode == "hybrid":
+                fast_stub_response = _hybrid_fast_stub_response(
+                    "GET",
+                    settings,
+                    resource_path,
+                )
+                if fast_stub_response is not None:
+                    return fast_stub_response
                 hybrid_response = _hybrid_get_response(
                     settings,
                     resource_path,
@@ -188,6 +195,9 @@ def _handle_kobo_mutating_request(
             )
             if hybrid_response is not None:
                 return hybrid_response
+        fast_stub_response = _hybrid_fast_stub_response(method, settings, resource_path)
+        if fast_stub_response is not None:
+            return fast_stub_response
         return _hybrid_mutating_proxy_response(
             method,
             settings,
@@ -1143,6 +1153,55 @@ _HYBRID_AUTH_REFRESH_TRIGGER_PATHS = {
     "/v1/user/loyalty/benefits",
     "/v1/deals",
 }
+
+
+_HYBRID_NONESSENTIAL_GET_PATHS = {
+    "/v1/affiliate",
+    "/v1/assets",
+    "/v1/deals",
+    "/v1/user/loyalty/benefits",
+    "/v1/user/recommendations",
+    "/v1/user/wishlist",
+}
+
+
+_HYBRID_NONESSENTIAL_POST_PATHS = {
+    "/v1/analytics/event",
+    "/v1/analytics/gettests",
+}
+
+
+def _hybrid_fast_stub_response(
+    method: str,
+    settings: Settings,
+    resource_path: str,
+) -> Response | None:
+    if not settings.hybrid_stub_nonessential_kobo:
+        return None
+    if not _is_hybrid_nonessential_request(method, resource_path):
+        return None
+    logger.debug("Stubbing nonessential hybrid Kobo %s %s", method, resource_path)
+    compatibility_response = _compatibility_response(resource_path)
+    if compatibility_response is not None:
+        return compatibility_response
+    return Response(HTTPStatus.OK, payload={})
+
+
+def _is_hybrid_nonessential_request(method: str, resource_path: str) -> bool:
+    if method == "GET":
+        return (
+            resource_path in _HYBRID_NONESSENTIAL_GET_PATHS
+            or (
+                resource_path.startswith("/v1/products/")
+                and resource_path.endswith("/nextread")
+            )
+        )
+    if method == "POST":
+        return (
+            resource_path in _HYBRID_NONESSENTIAL_POST_PATHS
+            or resource_path.startswith("/v1/analytics/")
+        )
+    return False
 
 
 def _compatibility_response(resource_path: str) -> Response | None:
